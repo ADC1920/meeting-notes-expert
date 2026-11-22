@@ -1,0 +1,64 @@
+# 排版与出稿链
+
+纪要排版完全走 `article-format` 技能，本技能不复制其字体字号取值。
+**规格唯一权威源**为该技能目录下的 `profiles/formal-doc.yaml`（v2.1 起基线 `article-format.yaml` 只供继承，不对外暴露），改规格只改该 yaml。
+
+纪要用 **`--profile formal-doc`**：该 profile 是原 default 基线的正式选项，版式与 v1.x 一致。v2.1 起 article-format 不再提供隐式默认，**不带 `--profile` 一律报错退出（exit 2）**。
+
+## 路径约定（本技能独立安装，不在任何特定仓库内）
+
+本技能可作为独立技能安装到任意位置，因此下面所有命令都通过两个环境变量定位脚本，不写死仓库相对路径。先设置一次：
+
+```bash
+# 本技能自己的 scripts 目录（装在哪就指哪）
+export MNX_SCRIPTS="$HOME/.zcode/skills/meeting-notes-expert/scripts"
+# article-format 技能的 scripts 目录
+export AF_SCRIPTS="$HOME/.agents/skills/article-format/scripts"
+```
+
+Windows PowerShell 用 `$env:MNX_SCRIPTS = "$HOME\.zcode\skills\meeting-notes-expert\scripts"`。
+如果本技能被装在项目仓库里（`<repo>/skills/meeting-notes-expert`），把 `MNX_SCRIPTS` 指到那里即可，命令本身不用改。
+
+后文命令一律写作 `"$MNX_SCRIPTS/xxx.py"` 与 `"$AF_SCRIPTS/xxx.py"`。
+
+## 纪要落稿映射
+
+- 主标题（纪要标题）用 `# `，不进导航树。
+- 各章节标题用 `## ` 起头，**不写编号**：中文「一、」脚本不剥离，会与 Word 自动编号叠成双重编号；写阿拉伯数字会被剥离后重排——一律不写最稳。章节序号由 Word 自动多级编号生成（1 / 1.1 / 2 …）。
+- 议题小节用 `### `，再细分逐级用 `#### `。
+- 正文加粗写 `**重点**`（正文、编号列表、表格单元格均渲染为真加粗）。
+- 待办事项用标准 Markdown 表格（**七列**：序号、待办事项、责任人/责任部门、完成时间、优先级、状态、备注；正式会议加「对应动议」列）；正文编号列表行首写 `1. `（转 Word 自动编号、顶格）。
+
+## 出稿链
+
+```
+# 0) 先 cd 到纪要工作目录——md2docx.py 的输出只取文件名并强制落在当前工作目录
+#    （上游防路径穿越设计），传绝对路径的目录部分会被静默丢弃，务必按此写法
+# 1) md → docx 骨架
+python "$AF_SCRIPTS/md2docx.py" 纪要.md 中间.docx --profile formal-doc
+python "$AF_SCRIPTS/article_style.py" 中间.docx 纪要.docx --profile formal-doc
+# 2) 待办表格版式（固定列宽、单元格缩进清零、防跨页断行、表头跨页重复）
+python "$MNX_SCRIPTS/fix_minutes_docx.py" 纪要.docx 纪要-终.docx
+```
+
+**换文体要改源稿重跑 md2docx，不要拿成品重排**——`article_style.py` 只换样式，已固化的列表编号与表格版式不会跟着变。
+
+## 交付前验证（四层）
+
+1. **结构与溯源**：`python "$MNX_SCRIPTS/validate_minutes.py" 纪要-终.docx --source 会议原文.txt`
+   查必需节、待办七列与字段、状态枚举、决策句式、禁用标注、数字/日期/责任人/出处溯源、软承诺强度、说话人归属；通用总结另判章节时间戳与术语定义。有源材料时必跑，`--strict` 让告警也阻断；脚本自带 `--selftest`。
+   输出带三态：`complete` 全过、`degraded` 无 FAIL 但有 WARN、`failed` 有 FAIL。改动提炼口径后跑一次 `--selftest` 确认校验逻辑本身没退化。六列旧件只告警不判错。
+
+2. **结构断言**：`python "$AF_SCRIPTS/verify_article_style.py" 纪要-终.docx --profile formal-doc`（约 105 条，随表格数浮动；含纸型 A4 / 页边距 2.54cm / 无字面 `**` 残留）。
+
+3. **XML 合法**：`officecli validate 纪要-终.docx`（要求 0 错误）。**WPS 保存过的文件会报 `uiPriority`/`themeFontLang` 元素顺序告警——这是 WPS 的写法不是文件损坏**：与编辑前备份对照，备份同报即放行；仅 document.xml 正文结构错误才算失败。
+
+4. **真机渲染**：WPS 导出 PDF 后目检。本技能附渲染脚本——`scripts\docx2pdf_wps.ps1`（`pwsh -File ... -Src <docx 绝对路径> -Dst <pdf 绝对路径>`，**两参数必须绝对路径**，相对路径会让 WPS COM 报「RPC 服务器不可用 0x800706BA」崩溃）与 `scripts\rasterize_pdf.py`（PDF 逐页转 PNG）。重点看表格列宽无截断、表头跨页重复、无字面星号；缺陷修好后重新出稿复验。续改模式只需人名与数字一致性复扫加渲染目检，不必重跑全套结构断言。
+
+## 续改模式（用户改稿后再调整）
+
+用户已在交付稿上手工修改后，**以用户改稿为唯一基线就地编辑**（python-docx / OOXML run 级替换，保留段内局部加粗与版式），**禁止按原稿重新生成覆盖**。
+
+编辑前先备份到系统临时目录（不留在交付目录）；多处文本替换时先长串后短串（防止短串先执行拆掉长串的匹配），改完复扫人名、数字与口径一致性并渲染目检。
+
+用户就纪要细节追问时（如「这个数字他当时怎么说的」「这条是谁提的」），先回原始材料核对再回答，回答区分「材料明确说过／据上下文推断／材料未提及」三种口径；涉及人名、金额、日期、责任归属的追问必须核对原文，不凭印象作答。
