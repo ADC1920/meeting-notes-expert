@@ -21,7 +21,7 @@
 
 8. **滑期约定从「靠人工自查」变成机检**：`extraction.md` 早写了「滑期两次必须改人改期或改范围」，但自述「校验器判不了」。新增 `--index` 落 JSONL 跨会索引、`--compare` 比对输出 `cross_meeting_report`（`slipped` 滑期明细 / `must_act` 累计两次须处置 / `vanished` 上期有本期消失）。跨会认同一件事靠「责任人 + 事项归一化串」。修的过程中抓到两个真 bug：① `_slip_key` 初稿把会议日期编进键里，同一件事下次会永远匹配不上、滑期恒为 0；② `slips` 只在内存累加不落盘，下次读取归零，且 compare 与 append 各算一次会重复计数——抽 `_next_slips()` 供两处共用，append 时把累计值写进记录。
 
-**验证**：`--selftest` 16 → **23 项全 PASS**；`tests/test_all.py` **65 项全 PASS**（六类骨架判定与导出、UTF-8/UTF-8-BOM/GBK/UTF-16 四种编码、五种标题编号前缀、schema 合规、既有校验项不退化、CLI 端到端、文件不存在退出码）；真实素材跑完整出稿链（md2docx → article_style → fix_minutes_docx）三步 exit 0，成品 docx 校验 `complete` 0 FAIL 0 WARN，`--export` 导出 2 条行动项 + schema 合规，连跑三次验证滑期：第 2 次记 1 次滑期不处置、第 3 次累计 2 次正确标 must_act。
+**验证**：`--selftest` 16 → **24 项全 PASS**（首轮统计报 23，漏数了「读取失败应为 error 态」那条带前置错误输出的行）；`tests/test_all.py` **65 项全 PASS**（六类骨架判定与导出、UTF-8/UTF-8-BOM/GBK/UTF-16 四种编码、五种标题编号前缀、schema 合规、既有校验项不退化、CLI 端到端、文件不存在退出码）；真实素材跑完整出稿链（md2docx → article_style → fix_minutes_docx）三步 exit 0，成品 docx 校验 `complete` 0 FAIL 0 WARN，`--export` 导出 2 条行动项 + schema 合规，连跑三次验证滑期：第 2 次记 1 次滑期不处置、第 3 次累计 2 次正确标 must_act。
 
 **未验证**：四新节的结构化只取「一节内的列表项」，多段落散文型条目会合并成一条（实测素材里四节都是单行条目，未遇到多段形态）；`--compare` 的「消失项」判定在跨会议系列标识缺失时，同一项目不同表述的任务会互相判成消失或新增，需要用户自己核对。
 
