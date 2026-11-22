@@ -469,7 +469,7 @@
 2. **章节标题改「不写编号」**：原表述称「中文编号由脚本剥离」——实测 `md2docx.py` 剥离正则只匹配阿拉伯数字，`## 一、会议基本信息` 会原样保留并与 Word 十进制自动编号叠成双重编号；现明确五章节标题一律不写编号，序号由 Word 生成（1 / 1.1 / 2 …）。模板与交叉引用同步去编号。
 3. **补全出稿四步链与三层验证**：原只写 md2docx + article_style 两步；补第 3 步表格后处理（本技能 `scripts/fix_minutes_docx.py`）与三层验证（verify_article_style 65 条断言 / officecli validate / WPS 真机渲染，附 `docx2pdf_wps.ps1` 与 `rasterize_pdf.py`）。
 4. **新增「转写稿处理」节**：说话人身份推定、人名专名归一、数字口径冲突并列待确认、口语噪声剔除不改语义、长稿先通读再落笔（上轮真实难点沉淀）。
-5. **路径可移植**：脚本命令由硬编码 `C:\Users\21940\...` 改为 `%USERPROFILE%` 写法（技能目录随用户主目录解析）。
+5. **路径可移植**：脚本命令由硬编码的用户主目录绝对路径改为 `%USERPROFILE%` 写法（技能目录随用户主目录解析）。
 6. **规格表删除**：字体字号表原样复制自 article-format，今日该规格 4 次变更 + 1 次回滚、漂移风险高；现改为回指 `article-format.yaml`（唯一权威源），本技能只保留纪要特有的落稿映射。
 7. **交付格式明确**：默认交付 docx 成品；Markdown 为中间源稿（仅存档时保留）。
 8. **初始化与自动触发衔接**：材料已在手边时不出开场白，直接进入提炼。
@@ -477,7 +477,7 @@
 
 **验证**：SKILL.md front-matter YAML 解析通过（version 1.1.0）；全链回归——上轮真实源稿（20 KB / 166 行 / 24 处 `**`）重跑 article-format v1.5.1 + 本技能后处理：`verify_article_style.py` **65/65 PASS**（含「无未解析的 ** 加粗标记」）、`officecli validate` 0 错误、与上轮已交付 docx 文本逐块比对 **192 块 0 差异**、WPS 真机导出 PDF 9 页（与原交付同页数）、纸型实测 21.00×29.70cm、表格页目检（表头跨页重复、列宽无截断）。
 
-**回滚点**：`C:\Users\21940\.zcode\tmp\af-backup-20260922-165553\article-format-pre-pagebold.tgz`（含本技能改前全目录）。
+**回滚点**：`%USERPROFILE%\.zcode\tmp\af-backup-20260922-165553\article-format-pre-pagebold.tgz`（含本技能改前全目录）。
 
 ## v1.0（2026-09 及以前）
 
