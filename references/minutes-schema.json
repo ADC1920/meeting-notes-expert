@@ -1,11 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "minutes-schema.json",
-  "title": "结构化总结结构（meeting-notes-expert，会议版章节名）",
-  "description": "validate_minutes.py 从总结 md/docx 解析出的结构必须满足本 schema；字段为空表示该节缺失。仅适用会议版章节名，通用总结不强制。",
+  "title": "结构化总结结构（meeting-notes-expert）",
+  "description": "validate_minutes.py 从总结 md/docx 解析出的结构必须满足本 schema。v3 起覆盖全部骨架（会议/正式/复盘/站会/通用/分层），并按骨架给出 action_section。sections 为纯文本保真副本，结构化字段另给数组。",
   "type": "object",
-  "required": ["basic_info", "sections"],
+  "required": ["basic_info", "sections", "document_kind"],
   "properties": {
+    "schema_version": {
+      "type": "integer",
+      "description": "导出结构版本。v1 只有纯文本决策列表；v2 加 document_status / processing_warnings；v3 加 document_kind / action_section / 四新节结构化数组"
+    },
+    "source_file": {"type": "string"},
+    "document_kind": {
+      "enum": ["meeting", "formal", "retro", "standup", "generic", "layered"],
+      "description": "判定出的骨架类型，来自 references/sections.json。校验器与导出器共用 detect_kind 判出，不允许两处各判一套"
+    },
+    "document_kind_label": {"type": "string"},
+    "meeting_type": {
+      "type": "string",
+      "description": "会议性质（决策审批／工作推进／研讨交流／汇报通报），取自基本信息区；通用总结与复盘站会通常为空"
+    },
     "basic_info": {
       "type": "object",
       "description": "会议基本信息，键为字段名（会议主题/会议时间/…），值为内容",
@@ -13,25 +27,16 @@
     },
     "sections": {
       "type": "object",
-      "description": "会议结论与会议内容必填；关键决策/待办事项为条件节，无内容时整节不出现（章节计划是上限不是配额）。",
-      "required": ["会议结论", "会议内容"],
-      "additionalProperties": {"type": "string"},
-      "properties": {
-        "会议结论": {"type": "string", "minLength": 1},
-        "关键决策": {"type": "string", "minLength": 1},
-        "待办事项": {"type": "string", "minLength": 1},
-        "无人认领事项": {"type": "string"},
-        "风险与顾虑": {"type": "string"},
-        "时间线": {"type": "string"},
-        "分歧与转折条件": {"type": "string"},
-        "待定与开放问题": {"type": "string"},
-        "上期行动项回顾": {"type": "string"},
-        "会议内容": {"type": "string", "minLength": 1}
-      }
+      "description": "各节纯文本。必填节按骨架不同（见 document_kind），这里不再写死会议版两节",
+      "additionalProperties": {"type": "string"}
+    },
+    "action_section": {
+      "type": ["string", "null"],
+      "description": "本次采用的是哪一节承载行动项：会议=待办事项、复盘=下轮改进项、分层=行动项、通用=行动事项、站会=null"
     },
     "action_items": {
       "type": "array",
-      "description": "待办表数据行（不含表头）。status/strength/source 为可选项：旧六列纪要没有这三列，解析为空字符串时不下发对应键。",
+      "description": "行动项表数据行（不含表头），取自 action_section 指向的那一节。status/strength/source 为可选项：旧六列纪要没有这三列，解析为空字符串时不下发对应键。",
       "items": {
         "type": "object",
         "required": ["id", "task", "owner", "due", "priority", "note"],
@@ -72,6 +77,26 @@
     "decision_texts": {
       "type": "array",
       "description": "决策纯文本（向后兼容：旧消费方读这里，避免被对象化改动打断）",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "unclaimed_items": {
+      "type": "array",
+      "description": "无人认领事项（Orphan）：会上提出但无承接人的事，逐条一个字符串。下游据此筛「待指派或待放弃」",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "risks": {
+      "type": "array",
+      "description": "风险与顾虑：逐条一个字符串，保持「什么风险、谁的判断、什么前提」的自由表述，不硬拆字段（硬拆会逼出编造）",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "timeline": {
+      "type": "array",
+      "description": "时间线条目：什么时间点有什么事件，逐条一个字符串",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "divergences": {
+      "type": "array",
+      "description": "分歧与转折条件：分歧内容、各方立场、什么证据能改变立场，逐条一个字符串",
       "items": {"type": "string", "minLength": 1}
     },
     "document_status": {

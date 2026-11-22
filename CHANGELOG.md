@@ -1,5 +1,30 @@
 # meeting-notes-expert 技能变更记录
 
+## 2026-11-22 · v1.16.0
+
+**动因**：用户要求从后端工程师视角评估技能并「P0～P2 全做、做完全面测试」。先做评估（只审不改），实测抓出 4 个 P0 与 3 个 P1 缺陷，全部留可复现反例，再逐条修复。评估结论：文档层（判据与流程）已成熟，问题全在数据层与工程层——它是一个「只能出 docx、不能被程序正确消费」的技能。
+
+**P0 修复（会静默交出错误结果）**
+
+1. **导出器只认「待办事项」节**：复盘稿的表在「下轮改进项」、分层版在「行动项」、通用总结在「行动事项」，写死「待办事项」导致这些稿子各有表却导出 0 条，而同一稿校验器还报「行动项列名 7 列且顺序正确（1 行）」。改为从 `sections.json` 的 `action_section` 按骨架取，导出结果里加 `action_section` 字段说明取自哪一节。
+2. **导出状态与校验结论互斥**：`export_structured` 用会议版 `REQUIRED` 推状态，而 `validate()` 按骨架选 `need`，同一份复盘稿出现「校验 PASS 必需节齐备 [复盘会]」/「导出 状态 failed」。抽出 `detect_kind()` 与 `_kind_required()` 供两边共用；导出状态改为始终跑一次真实校验取三态，不再自推。修的过程中先踩到一个连带缺陷：导出直接把 `collect_action_items` 的原始行下发，`status`/`strength`/`source` 是空串而非缺键，schema 的 enum 被 `''` 打穿，六类骨架全部不合规——统一走 `_schema_item()` 归一化后修好。
+3. **模板示例自带编号，照抄即失败**：`templates.md` 的分层版示例写着「一、会议决策摘要」，而 `HEADING_RE` 精确匹配章节名，照抄模板会报 FAIL「基本信息表形态」+ WARN「未识别章节」四个，去编号后 PASS，与 `formatting.md`「章节标题不写编号」的硬规则自相矛盾。两头都改：`split_sections` 加 `strip_heading_number()` 剥离「一、」「（二）」「1.2」「第 3 章」四种前缀，示例同步去掉编号并注明骨架标记不是落稿标题。
+4. **编码失败误报为 docx 损坏**：GBK 或 UTF-16 的 md 报 `PackageNotFoundError: 无法解析 md/docx`，真实原因是解码失败，错误信息把排障方向带偏。新增 `read_text_any()` 按 UTF-8 → UTF-8-SIG → GB18030 → UTF-16 依次尝试，`parse_input()` 按后缀分流，编码失败明确报「文本编码无法识别」。
+
+**P1 补契约**
+
+5. **schema 只覆盖 8 个顶层字段**，四新节（无人认领/风险与顾虑/时间线/分歧与转折条件）在导出里只是纯文本。schema 升到 v3，加 `document_kind`、`document_kind_label`、`meeting_type`、`action_section`、`unclaimed_items`、`risks`、`timeline`、`divergences`。四节保持字符串数组不硬拆字段——它们的填法本身是自由散文（「什么风险、谁的判断、什么前提」），硬拆会逼出编造。
+6. **章节白名单两处各存一份**：脚本里七处常量（`REQUIRED`/`CONDITIONAL`/`GENERIC_*`/`RETRO_*`/`STANDUP_*`/`SUBTYPE_*`/`LAYERED_*`）加文档散文一份。抽出 `references/sections.json` 作单一真相源，脚本从它加载（带内置兜底，配置读不到时不崩也不静默放行），SKILL.md 配套文件表加首行指向它。
+7. **工程元数据缺失**：补 `LICENSE`（MIT，与 README 声称一致）、`requirements.txt`、`tests/test_all.py`（65 项全量回归）。清理 `__pycache__` 里的孤立字节码。
+
+**P2 跨会跟踪**
+
+8. **滑期约定从「靠人工自查」变成机检**：`extraction.md` 早写了「滑期两次必须改人改期或改范围」，但自述「校验器判不了」。新增 `--index` 落 JSONL 跨会索引、`--compare` 比对输出 `cross_meeting_report`（`slipped` 滑期明细 / `must_act` 累计两次须处置 / `vanished` 上期有本期消失）。跨会认同一件事靠「责任人 + 事项归一化串」。修的过程中抓到两个真 bug：① `_slip_key` 初稿把会议日期编进键里，同一件事下次会永远匹配不上、滑期恒为 0；② `slips` 只在内存累加不落盘，下次读取归零，且 compare 与 append 各算一次会重复计数——抽 `_next_slips()` 供两处共用，append 时把累计值写进记录。
+
+**验证**：`--selftest` 16 → **23 项全 PASS**；`tests/test_all.py` **65 项全 PASS**（六类骨架判定与导出、UTF-8/UTF-8-BOM/GBK/UTF-16 四种编码、五种标题编号前缀、schema 合规、既有校验项不退化、CLI 端到端、文件不存在退出码）；真实素材跑完整出稿链（md2docx → article_style → fix_minutes_docx）三步 exit 0，成品 docx 校验 `complete` 0 FAIL 0 WARN，`--export` 导出 2 条行动项 + schema 合规，连跑三次验证滑期：第 2 次记 1 次滑期不处置、第 3 次累计 2 次正确标 must_act。
+
+**未验证**：四新节的结构化只取「一节内的列表项」，多段落散文型条目会合并成一条（实测素材里四节都是单行条目，未遇到多段形态）；`--compare` 的「消失项」判定在跨会议系列标识缺失时，同一项目不同表述的任务会互相判成消失或新增，需要用户自己核对。
+
 ## 2026-11-22 · v1.15.1
 
 **动因**：v1.15.0 把模板搬到 `references/` 后引入新风险——没有任何机制保证 AI 真去读那个文件。换个会话可能只读主文件，凭残缺信息自创章节名。

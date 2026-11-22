@@ -47,7 +47,9 @@ python "$MNX_SCRIPTS/fix_minutes_docx.py" 纪要.docx 纪要-终.docx
 
 1. **结构与溯源**：`python "$MNX_SCRIPTS/validate_minutes.py" 纪要-终.docx --source 会议原文.txt`
    查必需节、待办七列与字段、状态枚举、决策句式、禁用标注、数字/日期/责任人/出处溯源、软承诺强度、说话人归属；通用总结另判章节时间戳与术语定义。有源材料时必跑，`--strict` 让告警也阻断；脚本自带 `--selftest`。
-   输出带三态：`complete` 全过、`degraded` 无 FAIL 但有 WARN、`failed` 有 FAIL。改动提炼口径后跑一次 `--selftest` 确认校验逻辑本身没退化。六列旧件只告警不判错。
+   输出带三态：`complete` 全过、`degraded` 无 FAIL 但有 WARN、`failed` 有 FAIL。改动提炼口径后跑一次 `--selftest` 确认校验逻辑本身没退化；改骨架或章节名后跑 `tests/test_all.py`（六类骨架、编码、编号、导出、索引全量回归）。六列旧件只告警不判错。
+
+   **需要机器可读产物时加 `--export`**：`--export 纪要.json` 按 `minutes-schema.json` 导出行动项、决策与四新节结构化数组；`--index 索引.jsonl --compare` 会与历史快照比对滑期，结果写进 `cross_meeting_report`。导出的 `document_kind` 与 `document_status` 和校验器同源，不会出现「校验 PASS、导出 failed」的互斥结论。
 
 2. **结构断言**：`python "$AF_SCRIPTS/verify_article_style.py" 纪要-终.docx --profile formal-doc`（约 105 条，随表格数浮动；含纸型 A4 / 页边距 2.54cm / 无字面 `**` 残留）。
 

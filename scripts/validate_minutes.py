@@ -25,61 +25,113 @@ from pathlib import Path
 
 TOOL_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = TOOL_DIR.parent / "references" / "minutes-schema.json"
+SECTIONS_PATH = TOOL_DIR.parent / "references" / "sections.json"
+
+
+def _load_sections():
+    """章节白名单从 references/sections.json 读，脚本内不再硬编码。
+
+    v1.15.1 及以前，必填节判据在本文件里存了七份常量（REQUIRED / CONDITIONAL /
+    GENERIC_REQUIRED / RETRO_REQUIRED / STANDUP_REQUIRED / LAYERED_REQUIRED /
+    FORMAL_EXTRA），SKILL.md 的散文里还有一份。两处各写一套的后果实测过——
+    同一份复盘稿，校验器按 RETRO 口径报 PASS，导出器按会议口径报 failed。
+    现在单一真相源在 JSON，文档与脚本都引用它。
+
+    文件缺失时退回内置兜底：校验器是交付前最后一道闸，不能在读不到配置时
+    直接崩掉或静默放行。
+    """
+    try:
+        data = json.loads(SECTIONS_PATH.read_text(encoding="utf-8"))
+        if data.get("kinds"):
+            return data
+    except (OSError, ValueError, KeyError):
+        pass
+    return _SECTIONS_FALLBACK
+
+
+_SECTIONS_FALLBACK = {
+    "kinds": {
+        "meeting": {"label": "会议纪要", "required": ["会议结论", "会议内容"],
+                    "conditional": ["关键决策", "待办事项", "无人认领事项",
+                                    "风险与顾虑", "时间线", "分歧与转折条件"],
+                    "optional": ["待定与开放问题", "上期行动项回顾"],
+                    "action_section": "待办事项"},
+        "formal": {"label": "正式会议", "extends": "meeting", "extra": ["法定要素"],
+                   "action_section": "待办事项"},
+        "retro": {"label": "复盘会",
+                  "required": ["本次目标与结果", "做得好的", "待改进", "下轮改进项"],
+                  "action_section": "下轮改进项", "detect_min": 3},
+        "standup": {"label": "站会", "required": ["进度", "计划", "阻塞"],
+                    "action_section": None},
+        "generic": {"label": "通用总结", "required": ["核心结论", "关键要点", "内容详情"],
+                    "optional": ["受访者原话", "解读与推断", "章节时间戳", "金句",
+                                 "提及资源", "术语定义", "案例与例证", "引用与参考",
+                                 "行动事项", "待定与开放问题", "上期事项回顾"],
+                    "action_section": "行动事项",
+                    "basic_fields": ["内容主题", "来源", "时间", "主讲人或参与人",
+                                     "记录人", "内容类型", "时长"]},
+        "layered": {"label": "会议纪要·完整分层版",
+                    "markers": ["会议决策摘要", "关键议题与讨论", "会议结论与后续安排"],
+                    "detect_min": 2,
+                    "required": ["会议决策摘要", "关键议题与讨论", "行动项",
+                                 "会议结论与后续安排"],
+                    "optional": ["项目背景", "项目背景与建设内容", "项目或议题背景",
+                                 "风险评估", "待决问题与风险", "意见与分歧"],
+                    "action_section": "行动项"},
+    },
+    "subtype_optional": ["近期进展", "挑战与困难", "职业发展", "双向反馈",
+                         "冲刺目标", "故事点与容量", "依赖与阻塞", "完成定义",
+                         "设计决策", "用户反馈", "待迭代问题", "上线标准",
+                         "状态概览", "已获批准", "升级事项", "下次同步"],
+    "basic_fields": ["会议主题", "会议时间", "会议地点", "参会人员", "记录人",
+                     "主持人", "会议方式", "会议编号", "会议形式",
+                     "参会方", "会议性质", "参会单位", "缺席人员", "会议主持"],
+    "containers": ["会议基本信息", "内容基本信息", "基本信息"],
+}
+
+_SECTIONS = _load_sections()
+_KINDS = _SECTIONS["kinds"]
+
+
+def _kind_required(kind):
+    """某骨架的必填节；formal 继承 meeting 再追加专属节。"""
+    cfg = _KINDS[kind]
+    req = list(cfg.get("required", []))
+    parent = cfg.get("extends")
+    if parent:
+        req = _kind_required(parent) + list(cfg.get("extra", []))
+    return req
+
+
+def _kind_action_section(kind):
+    cfg = _KINDS[kind]
+    if cfg.get("action_section"):
+        return cfg["action_section"]
+    parent = cfg.get("extends")
+    return _kind_action_section(parent) if parent else None
+
 
 # 常规会议的两节必填：结论（这次谈了什么）+ 内容（按议题展开）。
 # 「关键决策」「待办事项」2026-11-22 起降为条件节——讨论型会议本来就不产出决策与任务，
 # 强行要求这两节会让每个空节都长出一句占位话（本次真实素材：决策节 14 字占 0%）。
 # 章节计划是上限不是配额，没内容就整节不出现。历史稿仍带这两节时照常校验，不追究。
-REQUIRED = ["会议结论", "会议内容"]
-# 条件节：可以整节缺失，但一旦出现就按完整口径校验。留在这里是为了让
-# split_sections 认识这些节名，也能在导出结构里保留原文。
-CONDITIONAL = ["关键决策", "待办事项"]
-# 2026-11-22 吸纳自 pm-claude-skills 与 Fabric 的章节。全部条件化：有内容才出。
-# 「无人认领事项」收「应该有人去××」这类提出但无承接人的条目（Orphan），单列不污染待办表；
-# 「风险与顾虑」集中散落各议题的风险点；「时间线」集中截止日期；「分歧与转折条件」给研讨型会议
-# 记录各方分歧与「什么证据能改变立场」（Fabric summarize_debate 的核心维度）。
-CONDITIONAL += ["无人认领事项", "风险与顾虑", "时间线", "分歧与转折条件"]
-OPTIONAL = ["待定与开放问题", "上期行动项回顾"]
+REQUIRED = _kind_required("meeting")
+CONDITIONAL = list(_KINDS["meeting"].get("conditional", []))
+OPTIONAL = list(_KINDS["meeting"].get("optional", []))
 ALL_SECTIONS = REQUIRED + CONDITIONAL + OPTIONAL
-# 通用总结（访谈/播客/讲座等非会议材料）的章节名，见 SKILL.md「多类型模板分支」。
-# 两类共用同一套校验逻辑，只是必填节与字段名不同——非会议材料本来就不该有
-# 「关键决策」「待办事项」，用会议口径硬判会把合格的总结判成失败（实测）。
-GENERIC_REQUIRED = ["核心结论", "关键要点", "内容详情"]
-GENERIC_OPTIONAL = ["受访者原话", "解读与推断", "章节时间戳", "金句", "提及资源",
-                    "术语定义", "案例与例证", "引用与参考",
-                    "行动事项", "待定与开放问题", "上期事项回顾"]
+GENERIC_REQUIRED = _kind_required("generic")
+GENERIC_OPTIONAL = list(_KINDS["generic"].get("optional", []))
 GENERIC_SECTIONS = GENERIC_REQUIRED + GENERIC_OPTIONAL
-GENERIC_BASIC_OK = {"内容主题", "来源", "时间", "主讲人或参与人", "记录人",
-                    "内容类型", "时长"}
-# 会议三个子分支的专属章节（见 SKILL.md「多类型模板分支」）。
-# 正式会议在常规七节外多一个法定要素节；复盘与站会是各自独立的骨架，
-# 不用「关键决策/待办事项」——用常规口径去判它们，合格的稿子会被判缺节。
-FORMAL_EXTRA = ["法定要素"]
-RETRO_REQUIRED = ["本次目标与结果", "做得好的", "待改进", "下轮改进项"]
-STANDUP_REQUIRED = ["进度", "计划", "阻塞"]
-# 会议亚型追加节（吸纳自 pm-claude-skills 的「Meeting Types & Adaptations」）。
-# 全部可选：亚型增量本身有前提，某类会不涉及就不出该节。列在这里只为让分节器认识这些节名，
-# 不被当成「会议内容」的子标题吞掉。
-SUBTYPE_OPTIONAL = [
-    # 一对一
-    "近期进展", "挑战与困难", "职业发展", "双向反馈",
-    # 冲刺计划
-    "冲刺目标", "故事点与容量", "依赖与阻塞", "完成定义",
-    # 产品评审
-    "设计决策", "用户反馈", "待迭代问题", "上线标准",
-    # 干系人同步
-    "状态概览", "已获批准", "升级事项", "下次同步",
-]
+GENERIC_BASIC_OK = set(_KINDS["generic"].get("basic_fields", []))
+FORMAL_EXTRA = list(_KINDS["formal"].get("extra", []))
+RETRO_REQUIRED = _kind_required("retro")
+STANDUP_REQUIRED = _kind_required("standup")
+SUBTYPE_OPTIONAL = list(_SECTIONS.get("subtype_optional", []))
 MEETING_SUB_SECTIONS = (FORMAL_EXTRA + RETRO_REQUIRED + STANDUP_REQUIRED
                         + SUBTYPE_OPTIONAL)
-# 完整分层版（SKILL.md「输出变体·完整分层版」）：把七节按议题展开成两级，
-# 章节名与默认七节不同但语义同源。判据取三个独有节名，命中即按这一层校验。
-LAYERED_MARKERS = ("会议决策摘要", "关键议题与讨论", "会议结论与后续安排")
-LAYERED_REQUIRED = ["会议决策摘要", "关键议题与讨论", "行动项", "会议结论与后续安排"]
-# 分层版的可选节：材料没给就没有，但它们的名字必须被认成节——
-# 不认的话这些节里的表格会落进「基本信息区」，被误判成「基本信息用了表格」（实测）。
-LAYERED_OPTIONAL = ["项目背景", "项目背景与建设内容", "风险评估", "待决问题与风险",
-                    "意见与分歧"]
+LAYERED_MARKERS = tuple(_KINDS["layered"].get("markers", []))
+LAYERED_REQUIRED = _kind_required("layered")
+LAYERED_OPTIONAL = list(_KINDS["layered"].get("optional", []))
 FORBIDDEN = ["待确认", "存疑", "转写亦作", "不确定标注"]
 # 「未提供」「材料未提及」与「待确认」同属禁用标注：材料缺就整行省略，不交代缺口。
 # 「材料未记录」不在此列——它是结构性槽位（法定人数/表决票数/复盘原定目标）的合法写法。
@@ -119,13 +171,38 @@ MOTION_RE = re.compile(r"动议\s*([0-9]+|[一二三四五六七八九十]+)")
 GENERIC_TIMESTAMP_RE = re.compile(r"^\s*(\d{1,2}):([0-5]\d)")
 # 术语定义句式：讲座里引入术语时「X 是指」「所谓 X」「X 的定义是」。
 DEFINITION_RE = re.compile(r"(?:所谓\s*([^\s，。；：]{2,12})|([^\s，。；：]{2,12})\s*(?:是指|定义为|的定义是))")
-BASIC_FIELDS_OK = {"会议主题", "会议时间", "会议地点", "参会人员", "记录人",
-                   "主持人", "会议方式", "会议编号", "会议形式",
-                   # 完整分层版常用字段（对照听脑AI 模板）：参会方按单位列、
-                   # 会议性质标评审/初审/例会等，比「参会人员」更贴合多方会议。
-                   "参会方", "会议性质", "参会单位", "缺席人员", "会议主持"}
+BASIC_FIELDS_OK = set(_SECTIONS.get("basic_fields", []))
 HEADING_RE = re.compile(r"^##(?!#)\s+(.+)$")
 HEADING_STYLE_RE = re.compile(r"^(?:Heading|标题)\s*(\d+)$")
+# 章节标题前的编号前缀：「一、」「（一）」「第 1 章」「1.」。
+# 旧版 HEADING_RE 精确匹配章节名，带编号的标题一律认不出——而 templates.md 的
+# 分层版示例自己就写着「一、会议决策摘要」，照抄模板即报未识别章节 + 缺节（实测）。
+# formatting.md 明令「章节标题不写编号」（由 Word 自动编号），但用户手写带编号极常见，
+# 校验器必须宽容：剥掉前缀再比对，编号本身不进任何校验。
+HEADING_NUM_PREFIX_RE = re.compile(
+    r"^\s*(?:第\s*[0-9一二三四五六七八九十百]+\s*[章节部分]\s*[、.．:：]?\s*"
+    r"|[（(]\s*[0-9一二三四五六七八九十百]+\s*[）)]\s*"
+    r"|[0-9]{1,2}\s*[、.．]\s+"
+    r"|[一二三四五六七八九十]{1,3}\s*[、.．]\s*)")
+
+
+def strip_heading_number(name):
+    """剥掉章节标题的编号前缀，返回纯章节名。
+
+    「一、会议决策摘要」→「会议决策摘要」；「1.2 本次核心结论」→「本次核心结论」。
+    只剥标题开头、且只在后面确实还有字时剥——避免把「一」这种真章节名剥成空串。
+    """
+    s = (name or "").strip()
+    m = HEADING_NUM_PREFIX_RE.match(s)
+    if m:
+        rest = s[m.end():].strip()
+        if rest:
+            return rest
+    # 「1.2 本次核心结论」这类多级编号：剥掉前导的 1.2 / 1.2.3
+    m = re.match(r"^\d+(?:\.\d+)+\s+(\S.*)$", s)
+    if m:
+        return m.group(1).strip()
+    return s
 LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+[.、)])\s+")
 NUM_RE = re.compile(r"\d+(?:[.,]\d+)*\s*[%％]?")
 # 中文数字：纪要常把「百分之五」「两万亿」写成汉字，只比对阿拉伯数字会漏掉它们，
@@ -296,21 +373,26 @@ def split_sections(blocks):
     # 也看不出这一节被吞了——校验器报 PASS，只留一条莫名其妙的「非常规字段」提示。
     # 全部章节都写错时反而能被「必需节缺失」抓住，只有单节写错才是静默漏检。
     # 「会议基本信息」是基本信息区的容器标题，不是内容节，不能算未识别。
-    HEADING_CONTAINERS = {"会议基本信息", "内容基本信息", "基本信息"}
+    HEADING_CONTAINERS = set(_SECTIONS.get("containers", [])) or {
+        "会议基本信息", "内容基本信息", "基本信息"}
     unknown = []
     for kind, payload in blocks:
         if kind == "p":
             text = payload.strip()
             m = HEADING_RE.match(text)
             if m:
-                name = m.group(1).strip()
+                raw_name = m.group(1).strip()
+                name = strip_heading_number(raw_name)
                 # 通用总结的章节名也要认成节，否则「## 核心结论」会被当成基本信息区的
                 # 后续文本吞掉，类型判定永远命不中（实测：访谈总结被判成缺四个会议节）
                 cur = name if name in known else None
                 if cur:
                     sections.setdefault(cur, [])
-                elif name not in HEADING_CONTAINERS:
-                    unknown.append(name)
+                elif raw_name in HEADING_CONTAINERS or name in HEADING_CONTAINERS:
+                    # 容器标题（会议基本信息）不记未识别；它带编号时同样放行
+                    pass
+                else:
+                    unknown.append(raw_name)
                 continue
         if cur is None:
             if kind == "t":
@@ -436,8 +518,14 @@ def _has_motion_column(header):
 
 
 def _schema_item(it):
-    """待办行转 schema 载荷：空的可选字段不下发，避免 enum 被空串打穿。"""
-    out = {k: it[k] for k in ("id", "task", "owner", "due", "priority", "note")}
+    """待办行转 schema 载荷：空的可选字段不下发，避免 enum 被空串打穿。
+
+    导出器与 schema 校验都走这一个函数。导出器曾经直接把 collect_action_items
+    的原始行下发，那些行里 status/strength/source 是空字符串而不是缺键，
+    schema 的 enum 一碰到 '' 就报错（实测：六类骨架全部 schema 不合规）。
+    """
+    out = {k: it[k] for k in ("id", "task", "owner", "due", "priority", "note")
+           if it.get(k) not in (None, "")}
     for k in ("status", "strength", "source"):
         if it.get(k):
             out[k] = it[k]
@@ -478,6 +566,78 @@ def split_decision_source(line):
 
 
 # ---------- 校验 ----------
+def read_text_any(path):
+    """读文本文件，按 UTF-8 → UTF-8-SIG → GB18030 → UTF-16 依次尝试。
+
+    纯 UTF-8 解码失败就掉进 docx 分支，会让 GBK/UTF-16 的 md 报成
+    「PackageNotFoundError：无法解析 md/docx」——错误信息指向 docx 损坏，
+    真实原因是编码不对，排障方向被带偏（实测）。这里先把编码试遍，
+    全都失败才抛 UnicodeDecodeError，由上层给出「编码不对」的明确提示。
+    """
+    raw = path.read_bytes()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        # 有 UTF-16 BOM 的，先按 UTF-16 解，别让 UTF-8 拿 BOM 字节去撞运气
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("utf-8", raw, 0, min(len(raw), 1),
+                             "无法按 utf-8/gb18030/utf-16 解码")
+
+
+def parse_input(path):
+    """按后缀选解析器，返回 blocks。
+
+    .md/.txt 走文本解析；其余（.docx）走 docx 解析。文本解析失败时错误
+    信息必须点明是编码问题，不能落到 docx 分支上（那是误导）。
+    """
+    if path.suffix.lower() in (".md", ".markdown", ".txt"):
+        try:
+            text = read_text_any(path)
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"文本编码无法识别：{path.name} 不是 UTF-8/GBK/UTF-16 任一可识别编码，"
+                f"请转存为 UTF-8 后重试")
+        return parse_md(text)
+    try:
+        return parse_docx(path)
+    except Exception as e:
+        raise ValueError(f"无法解析 docx：{type(e).__name__}: {e}")
+
+
+def detect_kind(sections):
+    """判定骨架类型，返回 kind 键（见 references/sections.json 的 kinds）。
+
+    校验与导出共用这一份判据。v1.15.1 及以前，validate() 里按骨架选 need，
+    export_structured() 里却写死 REQUIRED（会议版），于是同一份复盘稿
+    校验报「PASS 必需节齐备 [复盘会]」、导出报「状态 failed」——两套判据必然漂移（实测）。
+    """
+    is_retro = all(k in sections for k in _kind_required("retro")[:3])
+    is_standup = ("进度" in sections and "计划" in sections and "阻塞" in sections
+                  and not is_retro)
+    markers = _KINDS["layered"].get("markers", [])
+    need_m = _KINDS["layered"].get("detect_min", 2)
+    is_layered = sum(1 for k in markers if k in sections) >= need_m
+    if is_retro or is_standup or is_layered:
+        if is_retro:
+            return "retro"
+        if is_standup:
+            return "standup"
+        return "layered"
+    if any(k in sections for k in
+           ("核心结论", "关键要点", "内容详情", "受访者原话",
+            "章节时间戳", "术语定义")):
+        return "generic"
+    if any(k in sections for k in FORMAL_EXTRA):
+        return "formal"
+    return "meeting"
+
+
 def validate(path, source_text=None, strict=False):
     results = []
 
@@ -491,30 +651,25 @@ def validate(path, source_text=None, strict=False):
         results.append(("WARN", name, detail))
 
     try:
-        text = path.read_text(encoding="utf-8")
-        blocks = parse_md(text)
-    except (UnicodeDecodeError, OSError):
-        try:
-            blocks = parse_docx(path)
-        except Exception as e:
-            print(f"读取失败：{e}")
-            # 回一条 FAIL 而不是空列表：空列表会让 summarize 判成 complete，
-            # 于是读取失败被打印成「状态：complete」（实测）。退出码仍是 2。
-            return 2, [("FAIL", "读取文件", f"无法解析 md/docx：{type(e).__name__}")]
+        blocks = parse_input(path)
+    except ValueError as e:
+        print(f"读取失败：{e}")
+        # 回一条 FAIL 而不是空列表：空列表会让 summarize 判成 complete，
+        # 于是读取失败被打印成「状态：complete」（实测）。退出码仍是 2。
+        return 2, [("FAIL", "读取文件", str(e))]
+    except OSError as e:
+        print(f"读取失败：{e}")
+        return 2, [("FAIL", "读取文件", f"文件无法读取：{type(e).__name__}: {e}")]
 
     basic, sections, basic_table, unknown_headings = split_sections(blocks)
-    # 类型判定：先看是不是复盘/站会（它们有独有的必填节），再看是不是通用总结，
-    # 都不命中才按常规会议（正式会议只是常规七节 + 法定要素节，必填节与常规相同）。
-    is_retro = all(k in sections for k in RETRO_REQUIRED[:3])
-    is_standup = ("进度" in sections and "计划" in sections and "阻塞" in sections
-                  and not is_retro)
-    is_layered = sum(1 for k in LAYERED_MARKERS if k in sections) >= 2
-    is_generic = (not is_retro and not is_standup and not is_layered and
-                  any(k in sections for k in
-                      ("核心结论", "关键要点", "内容详情", "受访者原话",
-                       "章节时间戳", "术语定义")))
-    is_formal = (not (is_retro or is_standup or is_generic or is_layered)
-                 and any(k in sections for k in FORMAL_EXTRA))
+    # 类型判定：复盘/站会/分层版有各自独有的必填节，通用总结靠专属节名识别，
+    # 都不命中才按常规会议（正式会议是常规 + 法定要素节）。判据与导出器共用 detect_kind。
+    kind = detect_kind(sections)
+    is_retro = kind == "retro"
+    is_standup = kind == "standup"
+    is_layered = kind == "layered"
+    is_generic = kind == "generic"
+    is_formal = kind == "formal"
     if basic_table:
         bad("基本信息表形态", "基本信息区使用了表格，规范要求逐行「字段名：内容」")
     # 未识别的二级标题：这是「模板没按 references/templates.md 走」唯一的机检信号。
@@ -533,20 +688,21 @@ def validate(path, source_text=None, strict=False):
         (warn if unknown else ok)("基本信息字段", "非常规字段：" + "、".join(unknown) if unknown else "")
 
     if is_retro:
-        need, kind = RETRO_REQUIRED, "复盘会"
+        need, kind_label = RETRO_REQUIRED, _KINDS["retro"]["label"]
     elif is_standup:
-        need, kind = STANDUP_REQUIRED, "站会"
+        need, kind_label = STANDUP_REQUIRED, _KINDS["standup"]["label"]
     elif is_layered:
-        need, kind = LAYERED_REQUIRED, "会议纪要·完整分层版"
+        need, kind_label = LAYERED_REQUIRED, _KINDS["layered"]["label"]
     elif is_generic:
-        need, kind = GENERIC_REQUIRED, "通用总结"
+        need, kind_label = GENERIC_REQUIRED, _KINDS["generic"]["label"]
     else:
-        need, kind = REQUIRED, ("正式会议" if is_formal else "会议纪要")
+        need = _kind_required("formal" if is_formal else "meeting")
+        kind_label = _KINDS["formal" if is_formal else "meeting"]["label"]
     missing = [s for s in need if not section_text(sections.get(s, []))]
     if missing:
-        bad("必需节齐备", f"[{kind}] 缺：" + "、".join(missing))
+        bad("必需节齐备", f"[{kind_label}] 缺：" + "、".join(missing))
     else:
-        ok("必需节齐备", f"[{kind}] " + "/".join(need) + " 均在")
+        ok("必需节齐备", f"[{kind_label}] " + "/".join(need) + " 均在")
 
     # 禁用标注必须扫全篇：只扫四个必填节正文时，把「会议时间：待确认」写进基本信息区、
     # 或另起一个 ## 附录 放不确定表述，都能绕过（实测）
@@ -746,13 +902,25 @@ def validate(path, source_text=None, strict=False):
         try:
             import jsonschema
             schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+            action_section = _kind_action_section("meeting")
             payload = {
+                "schema_version": 3,
+                "document_kind": "meeting",
+                "document_kind_label": _KINDS["meeting"]["label"],
+                "meeting_type": (basic.get("会议性质") or "").strip(),
                 "basic_info": basic,
                 "sections": {k: section_text(v) for k, v in sections.items()},
+                "action_section": action_section,
                 "action_items": [_schema_item(it) for it in items] if items else [],
                 "decisions": [{"text": t, "source": s} for t, s in
                               (split_decision_source(d) for d in decisions)],
                 "decision_texts": decisions,
+                "unclaimed_items": collect_plain_items(
+                    sections.get("无人认领事项", [])),
+                "risks": collect_plain_items(sections.get("风险与顾虑", [])),
+                "timeline": collect_plain_items(sections.get("时间线", [])),
+                "divergences": collect_plain_items(
+                    sections.get("分歧与转折条件", [])),
             }
             jsonschema.validate(payload, schema)
             ok("结构 schema", "符合 minutes-schema.json")
@@ -1250,34 +1418,402 @@ def selftest():
         print(f"[{'PASS' if no_false else 'FAIL'}] 合规章节名不得误报未识别")
         ok &= no_false
 
-        # 读取失败必须是 error 态，不能打印 complete
+        # 读取失败必须是 error 态，不能打印 complete。
+        # 夹具不能用 b"\xff\xfe..." —— 那是 UTF-16 BOM，v1.16.0 起有编码兜底后
+        # 会被成功解码，反而把一个可读文件判成「读取失败」（实测踩到）。
+        # 用 b"\xff\xff..."（无有效 BOM，utf-8/gb18030/utf-16 都解不动）才真的读不了。
         junk = Path(td) / "junk.md"
-        junk.write_bytes(b"\xff\xfe\x00\x00not-utf8")
+        junk.write_bytes(b"\xff\xff\xff\xffnot-utf8")
         rc7, res7 = validate(junk)
         st7, _ = summarize(res7)
         err_ok = rc7 == 2 and st7 == "error"
         print(f"[{'PASS' if err_ok else 'FAIL'}] 读取失败应为 error 态（exit={rc7}，status={st7}）")
         ok &= err_ok
+
+        # ---- v1.16.0 回归锁：本轮修的四类缺陷各留一条反例 ----
+
+        # P0-1 导出按骨架选表节名：复盘稿的表在「下轮改进项」，不在「待办事项」。
+        # 旧版写死「待办事项」导致表有一行却导出 0 条。
+        retro_doc = """# 复盘会纪要
+
+## 会议基本信息
+
+会议主题：迭代复盘
+会议时间：2026-11-20
+
+## 本次目标与结果
+
+按计划推进。
+
+## 做得好的
+
+需求提前冻结。
+
+## 待改进
+
+联调排期过紧。
+
+## 下轮改进项
+
+| 序号 | 待办事项 | 责任人/责任部门 | 完成时间 | 优先级 | 状态 | 备注 |
+|---|---|---|---|---|---|---|
+| 1 | 联调预留三天缓冲 | 张三 | 11 月 28 日 | 高 | 未开始 | 出处：00:20 张三 |
+
+## 会议内容
+
+复盘讨论。
+"""
+        rp = Path(td) / "retro.md"
+        rp.write_text(retro_doc, encoding="utf-8")
+        exp_retro = export_structured(rp)
+        retro_ok = (exp_retro["action_section"] == "下轮改进项"
+                    and len(exp_retro["action_items"]) == 1
+                    and exp_retro["document_kind"] == "retro")
+        print(f"[{'PASS' if retro_ok else 'FAIL'}] 复盘稿的改进项应被导出"
+              f"（section={exp_retro['action_section']}，{len(exp_retro['action_items'])} 条）")
+        ok &= retro_ok
+
+        # P0-1b 分层版的表在「行动项」，且标题带编号（模板示例就是带编号的）
+        layered_doc = """# 分层版纪要
+
+## 会议基本信息
+
+会议主题：方案评审
+会议时间：2026-11-20
+
+## 一、会议决策摘要
+
+决定采用方案 A。
+
+## 三、关键议题与讨论
+
+讨论若干。
+
+## 六、行动项
+
+| 序号 | 待办事项 | 责任人/责任部门 | 完成时间 | 优先级 | 状态 | 备注 |
+|---|---|---|---|---|---|---|
+| 1 | 补充成本测算 | 李四 | 11 月 25 日 | 高 | 未开始 | 出处：00:30 李四 |
+
+## 七、会议结论与后续安排
+
+按方案 A 推进。
+"""
+        lp = Path(td) / "layered.md"
+        lp.write_text(layered_doc, encoding="utf-8")
+        rc_l, res_l = validate(lp)
+        exp_l = export_structured(lp)
+        layered_ok = (exp_l["document_kind"] == "layered"
+                      and len(exp_l["action_items"]) == 1
+                      and exp_l["action_section"] == "行动项"
+                      and rc_l == 0)
+        print(f"[{'PASS' if layered_ok else 'FAIL'}] 分层版带编号标题应被认且表应导出"
+              f"（kind={exp_l['document_kind']}，{len(exp_l['action_items'])} 条，exit={rc_l}）")
+        ok &= layered_ok
+
+        # P0-2 导出状态与校验结论必须一致：同一份复盘稿，两边都该是「没问题」
+        st_retro, _ = summarize(validate(rp)[1])
+        consistent = (st_retro == "complete"
+                      and exp_retro["document_status"] == "complete")
+        print(f"[{'PASS' if consistent else 'FAIL'}] 导出状态与校验结论不得互斥"
+              f"（校验={st_retro}，导出={exp_retro['document_status']}）")
+        ok &= consistent
+
+        # P0-4 编码兜底：GBK 的 md 应能正常读，且明确报「编码不对」而非「不是 docx」
+        gbk = Path(td) / "gbk.md"
+        gbk.write_bytes(SELFTEST_OK.encode("gbk"))
+        rc_g, res_g = validate(gbk)
+        gbk_ok = rc_g == 0
+        print(f"[{'PASS' if gbk_ok else 'FAIL'}] GBK 编码的 md 应能正常读取（exit={rc_g}）")
+        ok &= gbk_ok
+
+        # 真不可读时错误信息要点明编码，不能报「无法解析 md/docx」
+        bad_enc = Path(td) / "bad-enc.md"
+        bad_enc.write_bytes(b"\xff\xff\xff\xff")
+        rc_e, res_e = validate(bad_enc)
+        msg_e = res_e[0][2] if res_e else ""
+        enc_msg_ok = (rc_e == 2 and "编码" in msg_e and "docx" not in msg_e)
+        print(f"[{'PASS' if enc_msg_ok else 'FAIL'}] 编码失败不得误报为 docx 损坏（{msg_e[:40]}）")
+        ok &= enc_msg_ok
+
+        # P1 schema 覆盖四新节：导出必须带结构化数组，不是只有纯文本
+        four_doc = """# 研讨纪要
+
+## 会议基本信息
+
+会议主题：方向研讨
+会议时间：2026-11-20
+会议性质：研讨交流
+
+## 会议结论
+
+本次未形成决议。
+
+## 无人认领事项
+
+- 「应该有人去问口径」——待定：指派给谁
+
+## 风险与顾虑
+
+- 预算超支风险，财务判断，前提是规模翻倍
+
+## 时间线
+
+- 11 月 30 日 提交初稿
+
+## 分歧与转折条件
+
+- 分歧：自研还是采购；若成本低于预期则同意自研
+
+## 会议内容
+
+研讨若干。
+"""
+        fp = Path(td) / "four.md"
+        fp.write_text(four_doc, encoding="utf-8")
+        exp_f = export_structured(fp)
+        four_ok = (len(exp_f["unclaimed_items"]) == 1
+                   and len(exp_f["risks"]) == 1
+                   and len(exp_f["timeline"]) == 1
+                   and len(exp_f["divergences"]) == 1
+                   and exp_f["meeting_type"] == "研讨交流")
+        print(f"[{'PASS' if four_ok else 'FAIL'}] 四新节应导出为结构化数组"
+              f"（{len(exp_f['unclaimed_items'])}/{len(exp_f['risks'])}/"
+              f"{len(exp_f['timeline'])}/{len(exp_f['divergences'])}，"
+              f"性质={exp_f['meeting_type']}）")
+        ok &= four_ok
+
+        # P2 跨会滑期：同一件事两次改期，第二次应计滑期，累计 2 次须处置
+        idx = Path(td) / "minutes-index.jsonl"
+        m1 = """# 周会
+
+## 会议基本信息
+
+会议主题：周会
+会议时间：2026-11-01
+
+## 会议结论
+
+按期推进。
+
+## 待办事项
+
+| 序号 | 待办事项 | 责任人/责任部门 | 完成时间 | 优先级 | 状态 | 备注 |
+|---|---|---|---|---|---|---|
+| 1 | 修复结算页按钮 | 张三 | 11 月 10 日 | 高 | 未开始 | 出处：00:10 张三 |
+
+## 会议内容
+
+推进。
+"""
+        m2 = m1.replace("2026-11-01", "2026-11-08").replace("11 月 10 日", "11 月 17 日")
+        m3 = m1.replace("2026-11-01", "2026-11-15").replace("11 月 10 日", "11 月 24 日")
+        for name, txt in (("m1.md", m1), ("m2.md", m2), ("m3.md", m3)):
+            (Path(td) / name).write_text(txt, encoding="utf-8")
+        # 第一次入索引（无历史可比，slips=0）
+        d1 = export_structured(Path(td) / "m1.md")
+        append_index(idx, d1, "2026-11-01", load_index(idx))
+        # 第二次：改期一次 → append 时 slips 记为 1；compare 读历史（slips=0）故不报处置
+        d2 = export_structured(Path(td) / "m2.md")
+        rep2 = compare_with_index(d2, load_index(idx), "2026-11-08")
+        append_index(idx, d2, "2026-11-08", load_index(idx))
+        # 第三次：历史快照 slips 已是 1，再改期一次 → compare 报滑期且累计达 2 须处置
+        d3 = export_structured(Path(td) / "m3.md")
+        rep3 = compare_with_index(d3, load_index(idx), "2026-11-15")
+        append_index(idx, d3, "2026-11-15", load_index(idx))
+        # 落库后重读应看到 slips=2，证明累计量真的持久化了（不是只在内存里）
+        persisted = load_index(idx)
+        persisted_slips = max((int(r.get("slips", 0)) for r in persisted.values()),
+                              default=-1)
+        slip_ok = (len(rep2["slipped"]) == 1 and len(rep2["must_act"]) == 0
+                   and len(rep3["slipped"]) == 1 and len(rep3["must_act"]) == 1
+                   and persisted_slips == 2)
+        print(f"[{'PASS' if slip_ok else 'FAIL'}] 跨会滑期计数与两次须处置"
+              f"（第2次滑{len(rep2['slipped'])}/处置{len(rep2['must_act'])}，"
+              f"第3次滑{len(rep3['slipped'])}/处置{len(rep3['must_act'])}，"
+              f"落库slips={persisted_slips}）")
+        ok &= slip_ok
+
+        # P1 章节白名单单一真相源：JSON 必须存在且被判据读到
+        single_src = (SECTIONS_PATH.is_file()
+                      and "会议结论" in _kind_required("meeting")
+                      and _kind_required("formal") == _kind_required("meeting") + ["法定要素"]
+                      and _kind_action_section("retro") == "下轮改进项")
+        print(f"[{'PASS' if single_src else 'FAIL'}] 章节白名单由 sections.json 驱动")
+        ok &= single_src
     print("SELFTEST", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
 
+def collect_plain_items(entries, stem_prefixes=()):
+    """把一节里的列表项抽成字符串列表（用于无人认领/风险/时间线/分歧四节）。
+
+    这四节在 v1.15.0 起是纯文本，导出时原样进 sections 就够人看，但下游要筛
+    「哪些风险还开着」「谁的条件没满足」时只能正则扒文本。这里给出最小结构化：
+    逐条成项，并尽量抽出首句作为标题句。不做字段级解析——四节的填法本身是
+    自由散文（「什么风险、谁的判断、什么前提」），硬拆字段会逼出编造。
+    """
+    out = []
+    for kind, payload in entries:
+        if kind != "p":
+            continue
+        text = LIST_RE.sub("", payload.strip()).strip()
+        if not text:
+            continue
+        for p in stem_prefixes:
+            if text.startswith(p):
+                text = text[len(p):].strip()
+                break
+        if text:
+            out.append(text)
+    return out
+
+
+def _slip_key(item, meeting_date=None):
+    """行动项的跨会稳定键：责任人 + 事项的归一化串。
+
+    待办表没有稳定 ID（每次会重新编号），跨会认同一件事只能靠内容。
+    责任人加进键里，是因为「同一件事换人做」应当算新任务而不是滑期。
+    meeting_date 不参与成键——带了日期，同一件事在下一次会上就永远匹配不上，
+    滑期计数会恒为 0（这是 v3 初稿的缺陷，索引一跑就暴露）。日期单独存进记录字段。
+    """
+    task = re.sub(r"[\s，。、；;：:（）()“”\"'《》！!？?]", "",
+                  item.get("task") or "")
+    owner = re.sub(r"\s", "", item.get("owner") or "")
+    return f"{owner}|{task}"
+
+
+def load_index(index_path):
+    """读跨会索引（JSONL，一行一条行动项快照），按 key 归并出最新状态。
+
+    索引是 append-only 的流水，每次出稿追加一批；读取时按 key 取最后一条，
+    这样「滑期」只需要比较两次快照的完成时间，不需要改写历史行。
+    文件不存在时返回空——第一次跑索引不该报错。
+    """
+    latest = {}
+    p = Path(index_path)
+    if not p.is_file():
+        return latest
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue          # 坏行跳过，不让一行脏数据毁掉整个索引
+        key = rec.get("key")
+        if key:
+            latest[key] = rec
+    return latest
+
+
+def append_index(index_path, data, meeting_date, prev=None):
+    """把本次导出的行动项追加进 JSONL 索引。返回写入条数。
+
+    prev 是 load_index 读出的历史快照（可选）。传了就把累计滑期次数一并写进
+    新记录——滑期是跨会累计量，只在内存里加是没用的：下一次 load_index 取到的是
+    最后一条，那条若不带 slips，计数就永远归零（v3 初稿实测踩到，
+    自检「两次须处置」一直判 0）。
+    """
+    rows = []
+    for it in data.get("action_items", []):
+        key = _slip_key(it)
+        rec = (prev or {}).get(key) or {}
+        slips = _next_slips(rec, it)
+        rows.append({
+            "key": key,
+            "meeting_date": meeting_date,
+            "source_file": data.get("source_file", ""),
+            "task": it.get("task", ""),
+            "owner": it.get("owner", ""),
+            "due": it.get("due", ""),
+            "status": it.get("status", ""),
+            "priority": it.get("priority", ""),
+            "strength": it.get("strength", ""),
+            "slips": slips,
+        })
+    if rows:
+        with Path(index_path).open("a", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
+def _next_slips(rec, item):
+    """历史快照 + 本次改期 → 本次之后的累计滑期次数。
+
+    compare 与 append 必须共用这一个算法。分开各算一次的后果实测过：
+    compare 读 append 之前的快照，只看到 1 次滑期，于是「累计 2 次须处置」
+    永远不触发；而 append 写回的是 2，两边对不上。
+    """
+    slips = int((rec or {}).get("slips", 0))
+    prev_due = (rec or {}).get("due", "")
+    cur_due = item.get("due", "")
+    if prev_due and cur_due and cur_due != prev_due:
+        slips += 1
+    return slips
+
+
+def compare_with_index(data, prev, meeting_date):
+    """拿本次行动项与历史索引比对，标出滑期与未闭环。
+
+    比对口径（对应 references/extraction.md「滑期约定」）：
+      - 本次仍出现且完成时间比上次晚 → 滑期一次
+      - 本次没出现、上次也不是完成/取消 → 消失项（可能悄悄丢了，值得人看一眼）
+      - 累计滑期 ≥2 且本次仍非完成 → 标 must_act，对应「滑两次必须改人改期或改范围」
+    这条规则此前只写在文档里、纯靠人工自查（v1.15.1 自述「校验器判不了」），
+    有了索引就能机检。
+    """
+    report = {"slipped": [], "vanished": [], "must_act": []}
+    seen = set()
+    for it in data.get("action_items", []):
+        loose = _slip_key(it)
+        rec = prev.get(loose)
+        seen.add(loose)
+        if not rec:
+            continue
+        slips = _next_slips(rec, it)
+        prev_due = rec.get("due", "")
+        cur_due = it.get("due", "")
+        if prev_due and cur_due and cur_due != prev_due:
+            report["slipped"].append(
+                {"task": it.get("task", ""), "owner": it.get("owner", ""),
+                 "from": prev_due, "to": cur_due, "slips": slips})
+        if slips >= 2 and it.get("status", "") not in ("完成", "取消"):
+            report["must_act"].append(
+                {"task": it.get("task", ""), "owner": it.get("owner", ""),
+                 "slips": slips})
+    for loose, rec in prev.items():
+        if loose in seen or rec.get("status") in ("完成", "取消"):
+            continue
+        report["vanished"].append(
+            {"task": rec.get("task", ""), "owner": rec.get("owner", ""),
+             "due": rec.get("due", "")})
+    return report
+
+
 def export_structured(path, source_text=None):
-    """把纪要解析成机器可读结构：基本信息 / 各节文本 / 待办表 / 决策列表。
+    """把纪要解析成机器可读结构：基本信息 / 各节文本 / 待办表 / 决策列表 / 四新节。
 
     纪要到这一步之前只是给人看的文档，下游（任务同步、跨会议检索、报表）
     拿不到任何字段。这里复用校验器已有的解析逻辑，不新增第二套解析器——
     两套解析器必然漂移，而校验器已经覆盖 md 与 docx 两种输入。
 
+    表节名按骨架取（_kind_action_section），不是写死「待办事项」：
+    复盘稿的表在「下轮改进项」、分层版在「行动项」、通用总结在「行动事项」。
+    v1.15.1 写死「待办事项」，导致这几类稿子各有表却导出 0 条（实测）。
+
     文档级完整性（status / processing_warnings）随导出一起下发：纪要「残不残」
     不能只藏在校验日志里，消费方拿到 JSON 就该知道。给了 source_text 时会先跑
-    一遍校验取真实三态；没给则按结构解析结果推——缺必填节 failed、有 WARN 无从
-    判断故给 complete（此时不代表已校验，只代表结构可解析）。
+    一遍校验取真实三态；没给则按 detect_kind 的必填节推——缺必填节 failed、
+    齐了 complete（此时不代表已校验，只代表结构可解析）。
     """
-    blocks = parse_md(path.read_text(encoding="utf-8", errors="replace")) \
-        if path.suffix.lower() == ".md" else parse_docx(path)
+    blocks = parse_input(path)
     basic, sections, _, _unknown = split_sections(blocks)
-    action_items, _header = collect_action_items(sections.get("待办事项") or [])
+    kind = detect_kind(sections)
+    action_section = _kind_action_section(kind)
+    action_items, _header = collect_action_items(sections.get(action_section) or [])
     decision_lines = collect_decisions(sections.get("关键决策") or [])
     decisions = []
     for line in decision_lines:
@@ -1285,26 +1821,37 @@ def export_structured(path, source_text=None):
         if text:
             decisions.append({"text": text, "source": src})
 
-    if source_text:
-        _rc, results = validate(path, source_text)
-        status, warn_dicts = summarize(results)
-        # summarize 已经把 WARN 归一成 {step, reason, message}，直接用，别再按元组取下标
-        warnings_payload = warn_dicts
-    else:
-        missing = [s for s in REQUIRED if not section_text(sections.get(s, []))]
-        status = "failed" if missing else "complete"
-        warnings_payload = ([{"step": "必需节齐备", "reason": "缺：" + "、".join(missing)}]
-                            if missing else [])
+    # 状态一律由真实校验产出，不自己按必填节推。
+    # 自推版本会把「结构齐但有 WARN」的稿子报成 complete，而同一文件跑
+    # validate 报 degraded——导出状态与校验结论打架（实测：正式会议缺决策节）。
+    # 代价是多解析一次，正确性优先；给了 source_text 时校验还会带上溯源核对。
+    _rc, results = validate(path, source_text)
+    status, warn_dicts = summarize(results)
+    warnings_payload = warn_dicts
+
+    # 四新节的结构化形态（v1.16.0）：保持纯文本 sections 不动，另给可筛的数组。
+    unclaimed = collect_plain_items(sections.get("无人认领事项") or [])
+    risks = collect_plain_items(sections.get("风险与顾虑") or [])
+    timeline = collect_plain_items(sections.get("时间线") or [])
+    divergences = collect_plain_items(sections.get("分歧与转折条件") or [])
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_file": str(path),
+        "document_kind": kind,
+        "document_kind_label": _KINDS[kind]["label"],
+        "meeting_type": (basic.get("会议性质") or "").strip(),
         "basic_info": basic,
         "sections": {k: section_text(v) for k, v in sections.items()},
-        "action_items": action_items,
+        "action_items": [_schema_item(it) for it in action_items],
+        "action_section": action_section,
         "decisions": decisions,
         # 向后兼容：v1 消费方读纯文本决策列表
         "decision_texts": [d["text"] for d in decisions],
+        "unclaimed_items": unclaimed,
+        "risks": risks,
+        "timeline": timeline,
+        "divergences": divergences,
         "document_status": status,
         "status": status,
         "processing_warnings": warnings_payload,
@@ -1318,7 +1865,11 @@ def main(argv=None):
     ap.add_argument("--strict", action="store_true", help="WARN 也判失败")
     ap.add_argument("--json", dest="json_path", default=None, help="结果落 JSON")
     ap.add_argument("--export", default=None, metavar="JSON",
-                    help="导出结构化纪要（基本信息/各节/待办表/决策列表）到指定 JSON")
+                    help="导出结构化纪要（基本信息/各节/待办表/决策列表/四新节）到指定 JSON")
+    ap.add_argument("--index", default=None, metavar="JSONL",
+                    help="把本次行动项追加进跨会索引（JSONL）。已有的同键记录用于滑期比对")
+    ap.add_argument("--compare", action="store_true",
+                    help="配合 --index：与索引里的历史快照比对滑期与消失项，结果进 --export 的 cross_meeting_report")
     ap.add_argument("--selftest", action="store_true")
     ns = ap.parse_args(argv)
     if ns.selftest:
@@ -1329,16 +1880,36 @@ def main(argv=None):
     if not path.is_file():
         print(f"文件不存在：{path}")
         return 2
-    if ns.export:
-        export_source = (Path(ns.source).read_text(encoding="utf-8", errors="replace")
+    if ns.export or ns.index:
+        export_source = (read_text_any(Path(ns.source))
                          if ns.source else None)
         data = export_structured(path, export_source)
-        Path(ns.export).write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                                   encoding="utf-8")
-        print(f"结构化纪要已导出：{ns.export}"
-              f"（待办 {len(data['action_items'])} 条，决策 {len(data['decisions'])} 条，"
-              f"状态 {data['document_status']}）")
-    source = Path(ns.source).read_text(encoding="utf-8", errors="replace") if ns.source else None
+        # 会议时间用作索引的日期锚；解析不到就留空，不臆造
+        meeting_date = (data.get("basic_info", {}).get("会议时间") or "").strip()
+        prev = load_index(ns.index) if (ns.index or ns.compare) else {}
+        if ns.compare and ns.index:
+            data["cross_meeting_report"] = compare_with_index(
+                data, prev, meeting_date)
+        if ns.index:
+            # 先 compare 再 append：compare 读的是历史快照，append 把含累计 slips 的
+            # 新快照落库，顺序反了会拿本次刚写的行跟自己比
+            n = append_index(ns.index, data, meeting_date, prev)
+            print(f"已写入跨会索引 {n} 条：{ns.index}")
+        if ns.export:
+            Path(ns.export).write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                                       encoding="utf-8")
+            rep = data.get("cross_meeting_report") or {}
+            extra = ""
+            if rep:
+                extra = (f"，滑期 {len(rep.get('slipped', []))}，"
+                         f"须处置 {len(rep.get('must_act', []))}，"
+                         f"消失 {len(rep.get('vanished', []))}")
+            print(f"结构化纪要已导出：{ns.export}"
+                  f"（骨架 {data['document_kind']}，"
+                  f"行动项 {len(data['action_items'])} 条，"
+                  f"决策 {len(data['decisions'])} 条，"
+                  f"状态 {data['document_status']}{extra}）")
+    source = read_text_any(Path(ns.source)) if ns.source else None
     rc, results = validate(path, source, ns.strict)
     for level, name, detail in results:
         print(f"[{level}] {name}" + (f"  {detail}" if detail else ""))

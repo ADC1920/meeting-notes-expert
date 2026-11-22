@@ -9,7 +9,7 @@ metadata:
   language: zh-CN
   output_language: 简体中文（含全过程叙述）
   role: 内容总结专家（会议纪要）
-  version: "1.15.1"
+  version: "1.16.0"
 ---
 
 # 内容总结专家（Meeting Notes Expert）
@@ -22,11 +22,16 @@ metadata:
 
 | 文件 | 什么时候读 | 不读的后果 |
 | --- | --- | --- |
+| `references/sections.json` | 判类型之前 | 章节白名单的单一真相源。校验器从这里读必填节与行动项表所在节名；凭印象起标题会让整节不进任何校验 |
 | `references/templates.md` | 判完类型、写任何章节标题之前 | 章节名会自己编，校验器报「未识别章节」，内容整段不进任何校验 |
 | `references/extraction.md` | 提取待办之前 | 孤儿任务与软承诺会被误判，字段填法靠猜 |
 | `references/formatting.md` | 出稿之前 | 出稿链参数写错、验证步骤漏跑 |
 
-**这三个文件必须实际读取，不能凭主文件的摘要推断。** 主文件只放判据与流程；章节的完整名称、条件节的触发前提、字段填法细则都在 references 里。跳过不读就动笔，最常见的后果是章节名自创（例如把「待定与开放问题」写成「风险分析」），这类错误会让整节内容不进入任何校验——`validate_minutes.py` 的「未识别章节」项专门抓这个，报出来就说明该去读 `templates.md` 了。
+**这四个文件必须实际读取，不能凭主文件的摘要推断。** 主文件只放判据与流程；章节的完整名称、条件节的触发前提、字段填法细则都在 references 里。跳过不读就动笔，最常见的后果是章节名自创（例如把「待定与开放问题」写成「风险分析」），这类错误会让整节内容不进入任何校验——`validate_minutes.py` 的「未识别章节」项专门抓这个，报出来就说明该去读 `templates.md` 了。
+
+**章节白名单只在 `references/sections.json` 里维护一份**（v1.16.0 起）。脚本与文档都引用它，改章节名只改这一个文件。曾经的形态是脚本里七处常量加文档里一份散文，两处各写一套的后果实测过：同一份复盘稿，校验器报「PASS 必需节齐备」、导出器报「状态 failed」。
+
+**行动项的承载节按骨架不同**：会议与正式会议在「待办事项」、复盘在「下轮改进项」、分层版在「行动项」、通用总结在「行动事项」、站会没有表。导出器按骨架定位（`sections.json` 的 `action_section`），不要假定表永远在「待办事项」。
 
 出稿后用 `validate_minutes.py` 检查：若报「未识别章节」，说明章节名与模板不符，回 `templates.md` 对照改正，不要改校验器的白名单来迁就。
 
@@ -154,6 +159,35 @@ metadata:
 6. **审阅校对**——按「质量自检」逐项核对，含日期、人名、数据等关键元素与前后一致性；无法在原始记录中找到出处的内容一律删除、改为中性表述或用「说话人N」。
 7. **出稿与交付**——按 `references/formatting.md` 出 docx 并跑四层验证。交付目录只留用户原始件与 docx 成品；md 中间稿、渲染 PDF、PNG 等过程件验证后删除（用户明确要求存档时保留 md）。
 8. **续改模式**——用户已改稿时以改稿为唯一基线就地编辑，不重新生成覆盖。细则见 `references/formatting.md`。
+
+## 结构化导出与跨会跟踪（v1.16.0）
+
+出稿后可把纪要转成机器可读的 JSON，供任务同步、报表或跨会跟踪使用：
+
+```bash
+# 导出结构（骨架类型、行动项、决策、四新节、文档状态）
+python "$MNX_SCRIPTS/validate_minutes.py" 纪要.docx --export 纪要.json
+
+# 同时写入跨会索引，并与历史快照比对滑期
+python "$MNX_SCRIPTS/validate_minutes.py" 纪要.docx \
+  --index 纪要索引.jsonl --compare --export 纪要.json
+```
+
+导出结构与 `references/minutes-schema.json` 一一对应，关键字段：
+
+- `document_kind`：判定的骨架（meeting/formal/retro/standup/generic/layered），与校验器共用同一判据
+- `action_section`：本次行动项取自哪一节；`action_items` 就是那一节的行，不再假定「待办事项」
+- `meeting_type`：会议性质，取自基本信息区
+- `unclaimed_items` / `risks` / `timeline` / `divergences`：四新节的结构化数组，保持自由表述不硬拆字段
+- `document_status`：与校验器同源的三态，不会出现「校验 PASS、导出 failed」
+
+`--compare` 会拿本次行动项与索引历史比对，结果写进 `cross_meeting_report`：
+
+- `slipped`：本次完成时间比上期晚，逐条列出改期前后与累计次数
+- `must_act`：累计滑期 ≥2 且仍未完成，对应「滑两次必须改人、改期或改范围」
+- `vanished`：上期有、本期没出现也未完成，可能是悄悄丢了
+
+这条规则此前只写在 `references/extraction.md` 里靠人工自查，有了索引才真正能机检。
 
 ## 质量自检（交付前逐项过）
 

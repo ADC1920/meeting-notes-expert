@@ -1,0 +1,11 @@
+# 运行依赖（校验与出稿脚本）
+# 安装：uv pip install -r requirements.txt
+# 说明：脚本本身只用标准库；下列为可选增强，缺失时对应功能降级而非报错。
+
+python-docx>=1.1.0        # 读写 docx；缺失时 fix_minutes_docx.py 不可用、docx 校验退化为仅 md
+PyMuPDF>=1.24.0           # PDF 转 PNG 做渲染目检；缺失时跳过渲染目检
+jsonschema>=4.18.0        # 按 minutes-schema.json 校验导出结构；缺失时该项降级为 WARN
+
+# 外部技能依赖（不在本清单内 pip 安装）
+# article-format>=2.1.0   提供 md2docx.py / article_style.py / verify_article_style.py，
+#                         通过 AF_SCRIPTS 环境变量定位

@@ -29,9 +29,13 @@
 | Python 3.10+ | 跑 scripts 下的脚本 | 无法出稿校验 |
 | `python-docx` | 读写 docx | `fix_minutes_docx.py` 不可用 |
 | `pymupdf` | PDF 转 PNG 做渲染目检 | 跳过渲染目检 |
+| `jsonschema` | 按 schema 校验导出结构 | 该项降级为 WARN |
 | `article-format` 技能 | docx 排版规范（标题/字体/编号/A4） | 只能出 md，无规范 docx |
 
+前三项与 `jsonschema` 见 `requirements.txt`（`uv pip install -r requirements.txt`）。
 `article-format` 是另一个独立技能，装到 `~/.agents/skills/article-format` 即可。本技能通过 `AF_SCRIPTS` 环境变量定位它的脚本，不假定固定路径。
+
+脚本主体只用标准库：`validate_minutes.py` 不依赖任何第三方包即可跑校验与导出，`jsonschema` 缺失时 schema 项降级为 WARN 而不是报错。
 
 ## 用法
 
@@ -52,35 +56,57 @@ python "$MNX_SCRIPTS/validate_minutes.py" 纪要-终.docx --source 会议原文.
 
 `md2docx.py` 的输出只取文件名并强制落在当前工作目录，所以必须先 `cd` 到目标目录再跑。
 
+## 结构化导出与跨会跟踪
+
+```bash
+# 导出机器可读 JSON（骨架类型、行动项、决策、四新节、文档状态）
+python "$MNX_SCRIPTS/validate_minutes.py" 纪要-终.docx --export 纪要.json
+
+# 写入跨会索引并与历史比对滑期
+python "$MNX_SCRIPTS/validate_minutes.py" 纪要-终.docx \
+  --index 纪要索引.jsonl --compare --export 纪要.json
+```
+
+导出结构由 `references/minutes-schema.json` 定义。`document_kind` 与 `document_status` 与校验器同源，不会出现「校验 PASS、导出 failed」。`--compare` 输出 `cross_meeting_report`：`slipped` 滑期明细、`must_act` 累计滑期两次须处置、`vanished` 上期有本期消失。
+
 ## 文件结构
 
 ```
 SKILL.md                    主流程与判据（AI 读这个）
+LICENSE                     MIT
+requirements.txt            可选依赖清单（脚本主体只用标准库）
 references/
+  sections.json             章节白名单单一真相源（脚本与文档都引用）
   templates.md              各类型骨架、会议亚型、输出变体
   extraction.md             待办提取口径、孤儿任务判别、字段填法
   formatting.md             排版映射、出稿链、四层验证
-  minutes-schema.json       结构化导出 schema
+  minutes-schema.json       结构化导出 schema（v3）
   example-minimal.md        最小成稿示例
 scripts/
-  validate_minutes.py       结构与溯源校验（含 --selftest 16 项）
+  validate_minutes.py       结构与溯源校验、结构化导出、跨会索引（含 --selftest 23 项）
   fix_minutes_docx.py       待办表版式后处理
   rasterize_pdf.py          PDF 逐页转 PNG
   docx2pdf_wps.ps1          WPS 导出 PDF（Windows）
+tests/
+  test_all.py               全量回归（六骨架/编码/编号/导出/schema/索引）
 CHANGELOG.md                版本变更
 ```
 
 ## 自检
 
 ```bash
+# 校验器内置断言
 python "$MNX_SCRIPTS/validate_minutes.py" --selftest
+
+# 全量回归（65 项）
+python -I tests/test_all.py
 ```
 
-16 项断言，覆盖必需节、待办列、状态枚举、溯源、未识别章节、导出结构等。
+`--selftest` 23 项覆盖必需节、待办列、状态枚举、溯源、未识别章节、编码兜底、骨架导出、跨会滑期。`tests/test_all.py` 65 项覆盖六类骨架的判定与导出、四种编码、标题编号剥离、schema 合规、CLI 端到端。
 
 ## 版本
 
-当前 v1.15.1。变更历史见 `CHANGELOG.md`。
+当前 v1.16.0。变更历史见 `CHANGELOG.md`。
 
 ## 与其他项目的关系
 
