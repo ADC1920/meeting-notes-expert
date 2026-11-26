@@ -279,6 +279,23 @@ def main():
                 except Exception as e:
                     check(f"schema 合规 {expect_kind}", False, str(e).splitlines()[0][:120])
 
+        # ---- 6b 依赖缺失不得污染三态 ----
+        # 2026-11-26 实测缺陷：jsonschema 未装时 schema 校验记 WARN，
+        # 干净稿被判 degraded，同一份稿在有依赖的机器上却是 complete。
+        # 依赖缺失是环境问题，SKIP 不参与三态判定。
+        p = td / "clean.md"
+        p.write_text(MEETING, encoding="utf-8")
+        rc, results = V.validate(p)
+        status, warns_of_it = V.summarize(results)
+        check("干净稿三态为 complete（不受依赖影响）", status == "complete",
+              f"实为 {status}，WARN {[w['step'] for w in warns_of_it]}")
+        if any(r[0] == "SKIP" for r in results):
+            check("缺依赖记为 SKIP 而非 WARN", True)
+            check("SKIP 不进入告警列表", len(warns_of_it) == 0,
+                  f"告警 {[w['step'] for w in warns_of_it]}")
+        else:
+            check("依赖齐备时无 SKIP", True)
+
         # ---- 7 跨会索引与滑期 ----
         idx = td / "index.jsonl"
         base = MEETING
