@@ -158,6 +158,12 @@ ACTION_FIELD_MAP = {"序号": "id", "待办事项": "task", "责任人/责任部
 PRIORITIES = {"高", "中", "低", "待定"}
 # 状态五态 + 待定：跨会跟踪靠它区分「还没做」与「做完了」。
 STATUSES = {"未开始", "进行中", "受阻", "完成", "取消", "待定"}
+# 上期行动项回顾（四列）：只回溯「上次怎么定的、这次怎么样了」，不重列
+# 完整七列——优先级与备注在原始纪要里已有，本节点重复会让读者读两遍。
+# 状态沿用待办五态 + 待定，便于与待办表同一套判据核对。
+CARRY_COLUMNS = ["事项", "责任人", "上次完成时间", "状态"]
+CARRY_FIELD_MAP = {"事项": "task", "责任人": "owner",
+                   "上次完成时间": "prev_due", "状态": "status"}
 # 表述强度：软承诺入表但不升格为确定任务（SKILL.md「四类产出物归属」）。
 STRENGTHS = {"确定", "软性"}
 # 待办出处：备注列里以「出处：00:35 张三」或「出处：会议原文引文」形式标注。
@@ -541,6 +547,23 @@ def norm_anchor(s):
     return re.sub(r"[\s\[\]()（）【】:：，。、；;|—\-]", "", s or "")
 
 
+MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+MD_EMPH_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
+
+
+def strip_md_marks(text):
+    """剥掉行内 markdown 标记，只留纯文本。
+
+    决策/要点这类节在正式 docx 里用「加粗引导 + 段落」写法（见
+    references/formatting.md「正文标号」），md 源稿因此带 `**`。
+    导出到 JSON 时若不剥，下游拿到的 task/text 里会混着 `**`，
+    而同一条在 docx 里是干净的纯文本——同一份纪要两种口径（实测）。
+    """
+    t = MD_BOLD_RE.sub(r"\1", text or "")
+    t = MD_EMPH_RE.sub(r"\1", t)
+    return t.strip()
+
+
 def collect_decisions(entries):
     lines = []
     for kind, payload in entries:
@@ -548,7 +571,7 @@ def collect_decisions(entries):
             continue
         text = payload.strip()
         if text:
-            lines.append(LIST_RE.sub("", text).strip())
+            lines.append(strip_md_marks(LIST_RE.sub("", text)))
     return [x for x in lines if x]
 
 
@@ -590,13 +613,78 @@ def read_text_any(path):
                              "无法按 utf-8/gb18030/utf-16 解码")
 
 
+def parse_srt(text):
+    """把 SRT 字幕解析成 blocks。
+
+    SRT 是转写工具最常见的裸产物形态之一，SKILL.md 明确点名支持。
+    结构是一条条「序号 / 时间行 / 文本」，说话人通常写在文本里
+    （`说话人1：…`）。这里只保留时间行与文本行，丢掉序号行——
+    序号是排版产物，留着会被数字溯源当成事实数字。
+    """
+    blocks = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.fullmatch(r"\d+", line):
+            continue                      # 条目序号
+        m = re.match(r"(\d{1,3}:\d{2}(?::\d{2})?)[,.]\d{3}\s*-->\s*(.+)", line)
+        if m:
+            blocks.append(("p", f"[{m.group(1)}]"))
+            continue
+        blocks.append(("p", line))
+    return blocks
+
+
+def parse_json_transcript(text):
+    """把转录 JSON 解析成 blocks。
+
+    只认「含 segments 数组」的结构（上游管线 `转写结果.json` 的形态），
+    每条取 start/speaker/text 拼成 `[mm:ss] 说话人N：文本`——与 docx 原文
+    同一种形态，后续解析规则完全复用，不新增一套。结构不认识时抛
+    ValueError，让上层报明确错误而不是静默产出空稿。
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON 语法错误：{e.msg}（第 {e.lineno} 行）")
+    segs = data.get("segments") if isinstance(data, dict) else None
+    if not isinstance(segs, list):
+        raise ValueError("JSON 中未找到 segments 数组，无法当作转写产物解析")
+    blocks = []
+    for seg in segs:
+        if not isinstance(seg, dict):
+            continue
+        text_ = (seg.get("text") or "").strip()
+        if not text_:
+            continue
+        start = seg.get("start", 0)
+        try:
+            total = int(float(start))
+        except (TypeError, ValueError):
+            total = 0
+        speaker = (seg.get("speaker") or "").strip()
+        prefix = f"[{total // 60:02d}:{total % 60:02d}]"
+        blocks.append(("p", f"{prefix} {speaker}：{text_}" if speaker
+                       else f"{prefix} {text_}"))
+    if not blocks:
+        raise ValueError("segments 数组为空，没有可提炼的转写内容")
+    return blocks
+
+
+# 纯文本类后缀：走编码探测 + parse_md
+TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+
+
 def parse_input(path):
     """按后缀选解析器，返回 blocks。
 
-    .md/.txt 走文本解析；其余（.docx）走 docx 解析。文本解析失败时错误
-    信息必须点明是编码问题，不能落到 docx 分支上（那是误导）。
+    .md/.txt 走文本解析；.srt 走字幕解析；.json 走转录结构解析；
+    其余（.docx）走 docx 解析。文本解析失败时错误信息必须点明是编码
+    问题，不能落到 docx 分支上（那是误导）。
     """
-    if path.suffix.lower() in (".md", ".markdown", ".txt"):
+    suffix = path.suffix.lower()
+    if suffix in TEXT_SUFFIXES:
         try:
             text = read_text_any(path)
         except UnicodeDecodeError:
@@ -604,10 +692,56 @@ def parse_input(path):
                 f"文本编码无法识别：{path.name} 不是 UTF-8/GBK/UTF-16 任一可识别编码，"
                 f"请转存为 UTF-8 后重试")
         return parse_md(text)
+    if suffix in (".srt", ".vtt"):
+        try:
+            return parse_srt(read_text_any(path))
+        except UnicodeDecodeError:
+            raise ValueError(f"字幕文件编码无法识别：{path.name}")
+    if suffix == ".json":
+        try:
+            return parse_json_transcript(read_text_any(path))
+        except UnicodeDecodeError:
+            raise ValueError(f"JSON 文件编码无法识别：{path.name}")
     try:
         return parse_docx(path)
     except Exception as e:
         raise ValueError(f"无法解析 docx：{type(e).__name__}: {e}")
+
+
+def blocks_to_text(blocks):
+    """把 blocks 拼回纯文本，供溯源比对使用。
+
+    溯源（数字/日期/责任人/出处）只关心「原文里有没有这段字」，不关心
+    段落与表格结构，所以统一拼成纯文本即可。表格行按 ` | ` 拼接，与
+    section_text 的处理保持一致。
+    """
+    out = []
+    for kind, payload in blocks:
+        if kind == "p":
+            out.append(payload)
+        else:
+            out.extend(" | ".join(r) for r in payload)
+    return "\n".join(out)
+
+
+def read_source_text(path):
+    """读取 --source 指定的源材料，返回纯文本。
+
+    历史缺陷（v1.17.1 及以前）：两处 `--source` 处理直接调 read_text_any()，
+    跳过后缀分流。于是 SKILL.md 写明的主对接形态 `会议原文-*.docx` 一喂进来
+    就裸抛 UnicodeDecodeError 栈（exit=1），而 parse_docx() 本身是好的。
+    这是 v1.16.0「编码失败误报 docx 损坏」修复的残留分支——那次只修了主文件
+    路径，--source 这条没跟着改（实测复现）。
+
+    修法取统一入口而不是给两处调用点各打补丁：只要 --source 与主文件走
+    同一套后缀分流，就不会再出现「一边支持 docx 一边不支持」的漂移。
+    """
+    try:
+        return blocks_to_text(parse_input(path))
+    except ValueError:
+        raise
+    except OSError as e:
+        raise ValueError(f"源材料无法读取：{type(e).__name__}: {e}")
 
 
 def detect_kind(sections):
@@ -904,6 +1038,36 @@ def validate(path, source_text=None, strict=False):
             else:
                 warn("动议回指", "正式会议待办表建议加「对应动议」列，便于按动议核销执行情况")
 
+    # 上期行动项回顾（可选节）：v1.17.1 及以前只有节名白名单，写什么、
+    # 几列、怎么标状态全无定义，于是「设了这一节」与「这一节有用」之间没有
+    # 任何约束。这里补上最小契约：用四列表，状态取待办同一套枚举。
+    # 只在节存在时判——本节本来就可选（无上期材料时整节不出现）。
+    if "上期行动项回顾" in sections:
+        rows_c, header_c = _first_table(sections["上期行动项回顾"])
+        if not header_c:
+            warn("上期回顾", "本节未用表格；建议四列表（"
+                 + "/".join(CARRY_COLUMNS) + "），便于逐条核销结转")
+        elif header_c != CARRY_COLUMNS:
+            warn("上期回顾列名", "建议 " + "/".join(CARRY_COLUMNS)
+                 + "，实为 " + "/".join(header_c))
+        else:
+            keys_c = [CARRY_FIELD_MAP[h] for h in header_c]
+            bad_status, missing_task = [], []
+            for i, cells in enumerate(rows_c, 1):
+                rec = {k: (cells[j] if j < len(cells) else "")
+                       for j, k in enumerate(keys_c)}
+                if not rec["task"]:
+                    missing_task.append(str(i))
+                if rec["status"] and rec["status"] not in STATUSES:
+                    bad_status.append(f"第{i}行「{rec['status']}」")
+            if missing_task:
+                bad("上期回顾", "以下行「事项」为空：" + "、".join(missing_task[:5]))
+            elif bad_status:
+                bad("上期回顾状态", "不在 未开始/进行中/受阻/完成/取消/待定 内："
+                     + "、".join(bad_status[:5]))
+            else:
+                ok("上期回顾", f"{len(rows_c)} 行，四列齐备且状态合法")
+
     if not missing and not is_generic and not (is_retro or is_standup or is_layered):
         # schema 只描述常规会议结构：通用总结、复盘、站会的章节名不同，套会议 schema
         # 必然缺节，所以按类型跳过（不是放松校验——它们仍走上面的必填节与禁用标注检查）。
@@ -913,7 +1077,7 @@ def validate(path, source_text=None, strict=False):
             schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
             action_section = _kind_action_section("meeting")
             payload = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "document_kind": "meeting",
                 "document_kind_label": _KINDS["meeting"]["label"],
                 "meeting_type": (basic.get("会议性质") or "").strip(),
@@ -1074,6 +1238,31 @@ def validate(path, source_text=None, strict=False):
     # ---- 通用总结的两条可机检项（会议版不适用）----
     if is_generic:
         _check_generic_machine_items(sections, source_text, warn, ok, bad)
+
+    # ---- 会议正文的逐字引文（有源材料时判）----
+    # 为什么需要这一项：结构校验只能证明「写了结论」，证明不了「读过会」。
+    # 一份完全没读原文、只按主题编的纪要，同样能通过所有结构断言。要求会议
+    # 内容里至少有一条带说话人名与时间锚的逐字引文，是把「读过会」变成可机检
+    # 的证据位——引文必须能在源文里逐字找到，编不出来。
+    # 只对会议类骨架判（通用总结另有「受访者原话」节承担同一职责）；
+    # 只在给了源材料时判——无源文无法核对，此时要求引文反而会诱导编造。
+    if source_text and not is_generic and not (is_retro or is_standup):
+        content_body = section_text(sections.get("会议内容", []))
+        quotes = re.findall(r"[「“\"]([^」”\"]{4,80})[」”\"]", content_body)
+        if not quotes:
+            warn("逐字引文", "「会议内容」未含任何逐字引文；建议至少保留一条带说话人名的"
+                             "原话，作为确实读过会文的证据")
+        else:
+            flat_src = norm_anchor(source_text)
+            missing = [q for q in quotes
+                       if norm_anchor(q) not in flat_src]
+            if missing:
+                # 引文找不到时判 WARN 不判 FAIL：可能是删了语气词、可能原文有
+                # 转写错字而纪要按正确写法引用，硬判 FAIL 会逼人改坏引文。
+                warn("逐字引文溯源", "以下引文无法在源材料中逐字找到（可能改写过）："
+                     + "；".join(m[:30] for m in missing[:3]))
+            else:
+                ok("逐字引文", f"{len(quotes)} 条引文均可在源材料中找到")
 
     fails = sum(1 for r in results if r[0] == "FAIL")
     warns = sum(1 for r in results if r[0] == "WARN")
@@ -1650,6 +1839,144 @@ def selftest():
                       and _kind_action_section("retro") == "下轮改进项")
         print(f"[{'PASS' if single_src else 'FAIL'}] 章节白名单由 sections.json 驱动")
         ok &= single_src
+
+        # ---- v1.18.0 新增能力 ----
+        _td = Path(td)
+
+        # 源材料后缀分流：--source 必须与主文件走同一套解析器。
+        # 历史缺陷是本项要防的：两处 --source 直接 read_text_any，喂 docx 就裸抛栈。
+        src_txt = _td / "src-q.txt"
+        src_txt.write_text("[00:10] 说话人0：这个方案可以先跑一轮试点试试\n", encoding="utf-8")
+        src_docx = _td / "src-q.docx"
+        docx_ok = True
+        try:
+            from docx import Document
+            _d = Document()
+            _d.add_paragraph("[00:10] 说话人0：这个方案可以先跑一轮试点试试")
+            _d.save(str(src_docx))
+        except ImportError:
+            docx_ok = False
+        if docx_ok:
+            try:
+                got = read_source_text(src_docx)
+                split_ok = "说话人0" in got
+            except Exception as e:                       # noqa: BLE001
+                split_ok = False
+                got = repr(e)
+            print(f"[{'PASS' if split_ok else 'FAIL'}] --source 能吃 docx（后缀分流）")
+            ok &= split_ok
+        else:
+            print("[SKIP] --source 能吃 docx（python-docx 未安装）")
+
+        # SRT 解析：裸字幕必须被识别，且条目序号不得混进事实数字
+        srt = _td / "s.srt"
+        srt.write_text("1\n00:00:01,000 --> 00:00:04,000\n说话人0：第一句\n\n"
+                       "2\n00:00:05,000 --> 00:00:08,000\n说话人1：第二句\n", encoding="utf-8")
+        srt_ok = False
+        try:
+            srt_text = blocks_to_text(parse_input(srt))
+            srt_ok = "说话人0" in srt_text and "第一句" in srt_text
+        except Exception:                                  # noqa: BLE001
+            pass
+        print(f"[{'PASS' if srt_ok else 'FAIL'}] SRT 裸转写可解析")
+        ok &= srt_ok
+
+        # 转录 JSON：segments 形态转成与 docx 原文一致的 `[mm:ss] 说话人：` 行
+        js = _td / "t.json"
+        js.write_text(json.dumps({"segments": [
+            {"start": 65, "speaker": "说话人2", "text": "第三句"}]},
+            ensure_ascii=False), encoding="utf-8")
+        js_ok = False
+        try:
+            js_text = blocks_to_text(parse_input(js))
+            js_ok = "[01:05]" in js_text and "说话人2" in js_text
+        except Exception:                                  # noqa: BLE001
+            pass
+        print(f"[{'PASS' if js_ok else 'FAIL'}] 转录 JSON 可解析且时间戳正确")
+        ok &= js_ok
+
+        # 上期回顾四列契约：状态非法必须被抓
+        carry_bad = _td / "carry-bad.md"
+        carry_bad.write_text(
+            "# 周会\n\n## 会议结论\n\n定了。\n\n## 上期行动项回顾\n\n"
+            "| 事项 | 责任人 | 上次完成时间 | 状态 |\n"
+            "| --- | --- | --- | --- |\n| 旧事 | 甲 | 11月1日 | 差不多做完了 |\n\n"
+            "## 会议内容\n\n略。\n", encoding="utf-8")
+        _rc, carry_res = validate(carry_bad)
+        carry_caught = any(l == "FAIL" and n == "上期回顾状态" for l, n, _ in carry_res)
+        print(f"[{'PASS' if carry_caught else 'FAIL'}] 上期回顾状态非法应被抓")
+        ok &= carry_caught
+
+        # 结转草稿：vanished + 进行中都要带出来，已完成的不带
+        prev_idx = {"a|b": {"task": "旧任务", "owner": "甲", "due": "11月1日",
+                            "status": "进行中", "slips": 0}}
+        carry_md, carry_n = render_carryover(
+            prev_idx, {"vanished": [{"task": "消失任务", "owner": "乙", "due": "11月2日"}],
+                       "must_act": []})
+        carry_ok = (carry_n == 2 and "旧任务" in carry_md and "消失任务" in carry_md
+                    and CARRY_COLUMNS[0] in carry_md)
+        print(f"[{'PASS' if carry_ok else 'FAIL'}] 结转草稿含未闭环项（{carry_n} 条）")
+        ok &= carry_ok
+
+        # 逐字引文：源文里没有的引文必须告警
+        q_doc = _td / "q.md"
+        q_doc.write_text(
+            "# 纪要\n\n## 会议基本信息\n\n会议主题：X\n\n## 会议结论\n\n定了。\n\n"
+            "## 会议内容\n\n### 议题\n\n说话人0 说「这句话源文里根本没有」。\n",
+            encoding="utf-8")
+        _rc, q_res = validate(q_doc, "[00:10] 说话人0：别的内容")
+        q_caught = any(l == "WARN" and n == "逐字引文溯源" for l, n, _ in q_res)
+        print(f"[{'PASS' if q_caught else 'FAIL'}] 编造的逐字引文应被告警")
+        ok &= q_caught
+
+        # ---- v1.18.0 跨会跟踪缺陷修复（五项）----
+        # 提前完成不算滑期：旧实现只要新旧日期不同就 +1，把好事算成拖延
+        early = _next_slips({"due": "11月25日", "slips": 0}, {"due": "11月20日"}) == 0
+        late = _next_slips({"due": "11月20日", "slips": 0}, {"due": "11月25日"}) == 1
+        print(f"[{'PASS' if early and late else 'FAIL'}] 滑期只计顺延（提前不算）")
+        ok &= early and late
+
+        # 同一天换写法不算改期：2026-12-05 与 2026/12/5 是同一日
+        same_day = _next_slips({"due": "2026-12-05", "slips": 0},
+                               {"due": "2026/12/5"}) == 0
+        print(f"[{'PASS' if same_day else 'FAIL'}] 日期写法差异不算滑期")
+        ok &= same_day
+
+        # 责任人从「待定」落实成具名，不算任务消失（owner 已移出身份键）
+        p_own = {"修复按钮": {"task": "修复按钮", "owner": "待定",
+                              "due": "11月25日", "status": "未开始", "slips": 0}}
+        r_own = compare_with_index(
+            {"action_items": [{"task": "修复按钮", "owner": "张三",
+                               "due": "11月25日", "status": "进行中"}]},
+            p_own, "2026-11-26")
+        own_ok = not r_own["vanished"] and not r_own["slipped"]
+        print(f"[{'PASS' if own_ok else 'FAIL'}] 责任人落实不算新任务")
+        ok &= own_ok
+
+        # 同会两条同名任务不得相互覆盖
+        dup_idx = _td / "dup.jsonl"
+        append_index(dup_idx, {"source_file": "x", "action_items": [
+            {"task": "整理文档", "owner": "甲", "due": "11月25日", "status": "未开始"},
+            {"task": "整理文档", "owner": "甲", "due": "11月28日", "status": "未开始"}]},
+            "2026-11-20", {})
+        dup_live = len(load_index(dup_idx))
+        print(f"[{'PASS' if dup_live == 2 else 'FAIL'}] 同会同名任务不相互覆盖（{dup_live}/2）")
+        ok &= dup_live == 2
+
+        # 消失项只报一次：落墓碑后下一场不再重复
+        tomb_idx = _td / "tomb.jsonl"
+        append_index(tomb_idx, {"source_file": "a", "action_items": [
+            {"task": "旧任务", "owner": "甲", "due": "11月10日", "status": "未开始"}]},
+            "2026-11-01", {})
+        tp1 = load_index(tomb_idx)
+        tr1 = compare_with_index({"action_items": []}, tp1, "2026-11-08")
+        append_index(tomb_idx, {"source_file": "b", "action_items": []}, "2026-11-08", tp1)
+        tp2 = load_index(tomb_idx)
+        tr2 = compare_with_index({"action_items": []}, tp2, "2026-11-15")
+        tomb_ok = len(tr1["vanished"]) == 1 and len(tr2["vanished"]) == 0
+        print(f"[{'PASS' if tomb_ok else 'FAIL'}] 消失项只报一次"
+              f"（第1次{len(tr1['vanished'])}/第2次{len(tr2['vanished'])}）")
+        ok &= tomb_ok
     print("SELFTEST", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -1666,7 +1993,7 @@ def collect_plain_items(entries, stem_prefixes=()):
     for kind, payload in entries:
         if kind != "p":
             continue
-        text = LIST_RE.sub("", payload.strip()).strip()
+        text = strip_md_marks(LIST_RE.sub("", payload.strip()))
         if not text:
             continue
         for p in stem_prefixes:
@@ -1678,18 +2005,67 @@ def collect_plain_items(entries, stem_prefixes=()):
     return out
 
 
-def _slip_key(item, meeting_date=None):
-    """行动项的跨会稳定键：责任人 + 事项的归一化串。
+def _norm_task(task):
+    """事项归一化：去标点空白，用于跨会认同一件事。
 
-    待办表没有稳定 ID（每次会重新编号），跨会认同一件事只能靠内容。
-    责任人加进键里，是因为「同一件事换人做」应当算新任务而不是滑期。
-    meeting_date 不参与成键——带了日期，同一件事在下一次会上就永远匹配不上，
-    滑期计数会恒为 0（这是 v3 初稿的缺陷，索引一跑就暴露）。日期单独存进记录字段。
+    全半角括号与引号一并去除——只删标点不转换，避免逐字映射表漏字符
+    （实测踩过一次 maketrans 长度不等直接崩）。
     """
-    task = re.sub(r"[\s，。、；;：:（）()“”\"'《》！!？?]", "",
-                  item.get("task") or "")
-    owner = re.sub(r"\s", "", item.get("owner") or "")
-    return f"{owner}|{task}"
+    s = (task or "").strip()
+    return re.sub(r"[\s(),.;:!?\"'（）【】《》〈〉“”‘’：；，。、！？—\-–_/\[\]<>]", "", s)
+
+
+def _norm_due(due):
+    """完成时间归一化：把同一个日期的不同写法压成同一串。
+
+    实测过的误报：上期「2026-12-05」本期「2026/12/5」被判成一次滑期，
+    实际是同一个日子换了写法。这里统一成 ISO 形态再做比较，比较不了
+    （如「月底前」「下周三」）就退回原文，不强行解析——解析不了的可能
+    是真实改期，宁可让它走滑期判定也不要吞掉。
+    """
+    raw = (due or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"(\d{4})\s*[-/年.]\s*(\d{1,2})\s*[-/月.]\s*(\d{1,2})", raw)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日?", raw)
+    if m:
+        # 不带年份的按「月-日」归一，跨年比较由调用方决定是否接受
+        return f"{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return raw
+
+
+def _slip_key(item, meeting_date=None):
+    """行动项的跨会稳定键：只由事项归一化串构成。
+
+    **责任人不再进键**。历史实现用「责任人 + 事项」当键，实测两种误判：
+    上期责任人「待定」本期落实成「张三」，同一件事被判成「旧任务消失 +
+    新任务出现」；任务从甲转给乙也被判成两条不同的任务。改期与改派应当
+    被看见，而不是让这件事从跟踪里断链。
+
+    同一份纪要里两条同名任务仍会撞键，所以 append_index 会按键加同会
+    序号区分（见 _unique_key）；跨会匹配时只要有一条对上就算同一件事。
+    meeting_date 不参与成键——带了日期，同一件事下次会永远匹配不上。
+    """
+    return _norm_task(item.get("task"))
+
+
+def _unique_key(key, used, seq):
+    """同会内同名任务的去重键：撞键时追加序号，避免相互覆盖。
+
+    实测缺陷：同一份纪要里两条「整理文档」被压成一条，索引里只剩 1 条，
+    跨会比对时另一条永远「不存在」。
+    """
+    if key not in used:
+        used.add(key)
+        return key
+    k = f"{key}#{seq}"
+    while k in used:
+        seq += 1
+        k = f"{key}#{seq}"
+    used.add(k)
+    return k
 
 
 def load_index(index_path):
@@ -1726,8 +2102,11 @@ def append_index(index_path, data, meeting_date, prev=None):
     自检「两次须处置」一直判 0）。
     """
     rows = []
+    used, seq = set(), 1
     for it in data.get("action_items", []):
-        key = _slip_key(it)
+        # 同会内同名任务追加序号，避免两条同名项相互覆盖（实测：两条
+        # 「整理文档」被压成 1 条，另一条跨会永远匹配不上）
+        key = _unique_key(_slip_key(it), used, seq)
         rec = (prev or {}).get(key) or {}
         slips = _next_slips(rec, it)
         rows.append({
@@ -1742,11 +2121,45 @@ def append_index(index_path, data, meeting_date, prev=None):
             "strength": it.get("strength", ""),
             "slips": slips,
         })
+    # 消失项落墓碑：上次未闭环、本次没出现的，追加一条 vanished=true 记录。
+    # 不落墓碑的话，同一项会在之后每一场会都被列进 vanished（实测连续四会
+    # 重复报同一条），结转草稿里全是旧账，反而掩盖本期真丢的事。
+    # 注意必须独立于 rows 为空与否：本次一件待办都没有时，上期的未闭环项
+    # 恰恰全都消失了，正是最该落墓碑的场景（实测踩到：写在 if rows 里，
+    # 空待办的那一场什么都不写，下一场照旧重复报）。
+    cur_bases = {r["key"].split("#")[0] for r in rows}
+    for k, rec in (prev or {}).items():
+        if k.split("#")[0] in cur_bases:
+            continue
+        if rec.get("status") in ("完成", "取消") or rec.get("vanished"):
+            continue
+        tomb = dict(rec)
+        tomb.update({"key": k, "meeting_date": meeting_date,
+                     "source_file": data.get("source_file", ""),
+                     "vanished": True})
+        rows.append(tomb)
     if rows:
         with Path(index_path).open("a", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return len(rows)
+    return len([r for r in rows if not r.get("vanished")])
+
+
+def _due_is_later(prev_due, cur_due):
+    """本次完成时间是否比上次晚（真正顺延）。
+
+    与 _next_slips 共用同一判断，避免「算滑期」与「列 slipped」两处各判一套
+    而给出互相矛盾的结论。可比较的日期形态：完整日期 YYYY-MM-DD 与
+    月日 MM-DD（中文「11月25日」归一而来）。不可比较时返回 True——
+    无法判断先后就当作改期，让问题浮出来。
+    """
+    p_norm, c_norm = _norm_due(prev_due), _norm_due(cur_due)
+    if p_norm == c_norm:
+        return False
+    for pat in (r"\d{4}-\d{2}-\d{2}", r"\d{2}-\d{2}"):
+        if re.fullmatch(pat, p_norm) and re.fullmatch(pat, c_norm):
+            return c_norm > p_norm
+    return True
 
 
 def _next_slips(rec, item):
@@ -1755,11 +2168,19 @@ def _next_slips(rec, item):
     compare 与 append 必须共用这一个算法。分开各算一次的后果实测过：
     compare 读 append 之前的快照，只看到 1 次滑期，于是「累计 2 次须处置」
     永远不触发；而 append 写回的是 2，两边对不上。
+
+    **只有顺延才计滑期**。历史实现只要新旧日期不同就 +1，实测把「提前
+    完成」也算成一次滑期——那是好事不是拖延，计入会让 honest 的任务被
+    标成 must_act。日期先归一化再比，避免「2026-12-05」与「2026/12/5」
+    这种同一天换写法被判成改期。两串解析不出可比日期时退回不等即计
+    （无法判断先后，按保守方向当作改期，让问题浮出来而不是静默吞掉）。
     """
     slips = int((rec or {}).get("slips", 0))
     prev_due = (rec or {}).get("due", "")
     cur_due = item.get("due", "")
-    if prev_due and cur_due and cur_due != prev_due:
+    if not (prev_due and cur_due):
+        return slips
+    if _due_is_later(prev_due, cur_due):
         slips += 1
     return slips
 
@@ -1768,24 +2189,34 @@ def compare_with_index(data, prev, meeting_date):
     """拿本次行动项与历史索引比对，标出滑期与未闭环。
 
     比对口径（对应 references/extraction.md「滑期约定」）：
-      - 本次仍出现且完成时间比上次晚 → 滑期一次
+      - 本次完成时间比上次晚 → 滑期一次（**提前不算滑期**，那是好事）
       - 本次没出现、上次也不是完成/取消 → 消失项（可能悄悄丢了，值得人看一眼）
       - 累计滑期 ≥2 且本次仍非完成 → 标 must_act，对应「滑两次必须改人改期或改范围」
-    这条规则此前只写在文档里、纯靠人工自查（v1.15.1 自述「校验器判不了」），
-    有了索引就能机检。
+
+    匹配按事项归一化串（不含责任人）：待定落实成具名、任务转手，都不该让
+    这件事从跟踪里断链。索引里同会同名项带 `#n` 后缀，这里按「精确键 →
+    去后缀的基键」两级匹配，同会两条同名任务各自对得上不同历史记录。
     """
     report = {"slipped": [], "vanished": [], "must_act": []}
     seen = set()
     for it in data.get("action_items", []):
-        loose = _slip_key(it)
-        rec = prev.get(loose)
-        seen.add(loose)
+        base = _slip_key(it)
+        # 两级匹配：先精确键，再按基键找（历史记录可能带 #n 后缀）
+        rec_key = base if base in prev else None
+        if rec_key is None:
+            for k in prev:
+                if k == base or k.split("#")[0] == base:
+                    rec_key = k
+                    break
+        if rec_key:
+            seen.add(rec_key)
+        rec = prev.get(rec_key) if rec_key else None
         if not rec:
             continue
         slips = _next_slips(rec, it)
         prev_due = rec.get("due", "")
         cur_due = it.get("due", "")
-        if prev_due and cur_due and cur_due != prev_due:
+        if prev_due and cur_due and _due_is_later(prev_due, cur_due):
             report["slipped"].append(
                 {"task": it.get("task", ""), "owner": it.get("owner", ""),
                  "from": prev_due, "to": cur_due, "slips": slips})
@@ -1793,13 +2224,56 @@ def compare_with_index(data, prev, meeting_date):
             report["must_act"].append(
                 {"task": it.get("task", ""), "owner": it.get("owner", ""),
                  "slips": slips})
-    for loose, rec in prev.items():
-        if loose in seen or rec.get("status") in ("完成", "取消"):
+    for k, rec in prev.items():
+        if k in seen or rec.get("status") in ("完成", "取消"):
+            continue
+        # already_gone：上期就已标为消失，本期不再重复报（实测同一项连续
+        # 四会都被列进 vanished，草稿里全是旧账，反而掩盖本期真丢的事）
+        if rec.get("vanished"):
             continue
         report["vanished"].append(
             {"task": rec.get("task", ""), "owner": rec.get("owner", ""),
              "due": rec.get("due", "")})
     return report
+
+
+def render_carryover(prev, report):
+    """把跨会比对结果渲染成「上期行动项回顾」节的 markdown 草稿。
+
+    为什么只渲染草稿而不直接写进纪要：结转到哪一节、怎么写「为什么没做完」，
+    需要人按本次会议的实际讨论补。机检能做的是把「上次哪些还没闭环」准确
+    算出来并排成模板骨架，省掉人工翻上期纪要那一步。
+
+    数据来源全部复用已有机制（--index 的 JSONL 快照 + compare_with_index），
+    不新建一套跟踪体系：vanished 是「上期未完成、本期未出现」，must_act 是
+    「累计滑期 ≥2 仍未完成」，两者合并去重即待结转清单。
+    """
+    seen, rows = set(), []
+    for rec in report.get("vanished", []) + report.get("must_act", []):
+        task = rec.get("task", "")
+        if not task or task in seen:
+            continue
+        seen.add(task)
+        rows.append((task, rec.get("owner", "") or "待定",
+                     rec.get("due", "") or "待定"))
+    # 上期仍标记进行中/受阻的，也表示没闭环——但本次没出现不等于丢了，
+    # 可能只是没在会上提。这类只在索引里有记录时补进来，状态照抄。
+    for _key, rec in (prev or {}).items():
+        task = rec.get("task", "")
+        if not task or task in seen:
+            continue
+        if rec.get("status") in ("进行中", "受阻", "未开始"):
+            seen.add(task)
+            rows.append((task, rec.get("owner", "") or "待定",
+                         rec.get("due", "") or "待定"))
+    if not rows:
+        return "", 0
+    lines = ["## 上期行动项回顾", "",
+             "| " + " | ".join(CARRY_COLUMNS) + " |",
+             "| " + " | ".join("---" for _ in CARRY_COLUMNS) + " |"]
+    for task, owner, due in rows:
+        lines.append(f"| {task} | {owner} | {due} | 待定 |")
+    return "\n".join(lines) + "\n", len(rows)
 
 
 def export_structured(path, source_text=None):
@@ -1844,8 +2318,16 @@ def export_structured(path, source_text=None):
     timeline = collect_plain_items(sections.get("时间线") or [])
     divergences = collect_plain_items(sections.get("分歧与转折条件") or [])
 
+    # 上期行动项回顾（v1.18.0）：四列表按列名映射，与行动项同一套状态枚举。
+    carryover = []
+    carry_rows, carry_header = _first_table(sections.get("上期行动项回顾") or [])
+    if carry_header and carry_header == CARRY_COLUMNS:
+        for cells in carry_rows:
+            carryover.append({k: (cells[j] if j < len(cells) else "")
+                              for j, k in enumerate(CARRY_FIELD_MAP[h] for h in carry_header)})
+
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_file": str(path),
         "document_kind": kind,
         "document_kind_label": _KINDS[kind]["label"],
@@ -1861,6 +2343,7 @@ def export_structured(path, source_text=None):
         "risks": risks,
         "timeline": timeline,
         "divergences": divergences,
+        "carryover_items": carryover,
         "document_status": status,
         "status": status,
         "processing_warnings": warnings_payload,
@@ -1879,6 +2362,8 @@ def main(argv=None):
                     help="把本次行动项追加进跨会索引（JSONL）。已有的同键记录用于滑期比对")
     ap.add_argument("--compare", action="store_true",
                     help="配合 --index：与索引里的历史快照比对滑期与消失项，结果进 --export 的 cross_meeting_report")
+    ap.add_argument("--carryover", default=None, metavar="MD",
+                    help="配合 --index：把上期未闭环行动项渲染成「上期行动项回顾」节草稿，写入指定 md")
     ap.add_argument("--selftest", action="store_true")
     ns = ap.parse_args(argv)
     if ns.selftest:
@@ -1889,9 +2374,18 @@ def main(argv=None):
     if not path.is_file():
         print(f"文件不存在：{path}")
         return 2
-    if ns.export or ns.index:
-        export_source = (read_text_any(Path(ns.source))
-                         if ns.source else None)
+    # 源材料统一走 read_source_text：--source 与主文件共用后缀分流，
+    # 才能接住 SKILL.md 声明的主对接形态 `会议原文-*.docx`。读取失败按
+    # 错误态 exit=2 返回，不再裸抛栈（v1.17.1 及以前会崩，实测）。
+    source_text = None
+    if ns.source:
+        try:
+            source_text = read_source_text(Path(ns.source))
+        except (ValueError, OSError) as e:
+            print(f"源材料读取失败：{e}")
+            return 2
+    if ns.export or ns.index or ns.carryover:
+        export_source = source_text
         data = export_structured(path, export_source)
         # 会议时间用作索引的日期锚；解析不到就留空，不臆造
         meeting_date = (data.get("basic_info", {}).get("会议时间") or "").strip()
@@ -1899,6 +2393,15 @@ def main(argv=None):
         if ns.compare and ns.index:
             data["cross_meeting_report"] = compare_with_index(
                 data, prev, meeting_date)
+        if ns.carryover:
+            # 结转草稿必须在 append 之前算：append 会把本次条目写进索引，
+            # 之后 prev 已被污染，算出来的「上期未闭环」会混进本期自己。
+            md, n = render_carryover(prev, data.get("cross_meeting_report") or {})
+            if md:
+                Path(ns.carryover).write_text(md, encoding="utf-8")
+                print(f"上期行动项回顾草稿已生成：{ns.carryover}（{n} 条待结转）")
+            else:
+                print("上期无未闭环行动项，未生成结转草稿")
         if ns.index:
             # 先 compare 再 append：compare 读的是历史快照，append 把含累计 slips 的
             # 新快照落库，顺序反了会拿本次刚写的行跟自己比
@@ -1918,8 +2421,7 @@ def main(argv=None):
                   f"行动项 {len(data['action_items'])} 条，"
                   f"决策 {len(data['decisions'])} 条，"
                   f"状态 {data['document_status']}{extra}）")
-    source = read_text_any(Path(ns.source)) if ns.source else None
-    rc, results = validate(path, source, ns.strict)
+    rc, results = validate(path, source_text, ns.strict)
     for level, name, detail in results:
         print(f"[{level}] {name}" + (f"  {detail}" if detail else ""))
     fails = sum(1 for r in results if r[0] == "FAIL")

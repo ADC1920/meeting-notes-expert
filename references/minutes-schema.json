@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "minutes-schema.json",
   "title": "结构化总结结构（meeting-notes-expert）",
-  "description": "validate_minutes.py 从总结 md/docx 解析出的结构必须满足本 schema。v3 起覆盖全部骨架（会议/正式/复盘/站会/通用/分层），并按骨架给出 action_section。sections 为纯文本保真副本，结构化字段另给数组。",
+  "description": "validate_minutes.py 从总结 md/docx 解析出的结构必须满足本 schema。v3 起覆盖全部骨架（会议/正式/复盘/站会/通用/分层），并按骨架给出 action_section。v4 加上期行动项回顾结构化数组。sections 为纯文本保真副本，结构化字段另给数组。",
   "type": "object",
   "required": ["basic_info", "sections", "document_kind"],
   "properties": {
     "schema_version": {
       "type": "integer",
-      "description": "导出结构版本。v1 只有纯文本决策列表；v2 加 document_status / processing_warnings；v3 加 document_kind / action_section / 四新节结构化数组"
+      "description": "导出结构版本。v1 只有纯文本决策列表；v2 加 document_status / processing_warnings；v3 加 document_kind / action_section / 四新节结构化数组；v4 加 carryover_items（上期行动项回顾）"
     },
     "source_file": {"type": "string"},
     "document_kind": {
@@ -98,6 +98,22 @@
       "type": "array",
       "description": "分歧与转折条件：分歧内容、各方立场、什么证据能改变立场，逐条一个字符串",
       "items": {"type": "string", "minLength": 1}
+    },
+    "carryover_items": {
+      "type": "array",
+      "description": "上期行动项回顾（v1.18.0）：本节点存在时按四列解析，状态沿用行动项同一套枚举，便于与本期待办逐条核销",
+      "items": {
+        "type": "object",
+        "required": ["task", "owner", "prev_due", "status"],
+        "properties": {
+          "task": {"type": "string", "minLength": 1},
+          "owner": {"type": "string", "minLength": 1},
+          "prev_due": {"type": "string", "minLength": 1},
+          "status": {
+            "enum": ["未开始", "进行中", "受阻", "完成", "取消", "待定"]
+          }
+        }
+      }
     },
     "document_status": {
       "$ref": "#/$defs/OutputStatus",
