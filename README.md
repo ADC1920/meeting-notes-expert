@@ -206,15 +206,15 @@ references/
   templates.md              各类型骨架、会议亚型、输出变体
   extraction.md             待办提取口径、孤儿任务判别、字段填法
   formatting.md             排版映射、出稿链、验证步骤
-  minutes-schema.json       结构化导出 schema(v3)
+  minutes-schema.json       结构化导出 schema(v4)
   example-minimal.md        最小成稿示例
 scripts/
-  validate_minutes.py       结构校验、溯源核对、结构化导出、跨会索引(1934 行,含 --selftest 24 项)
+  validate_minutes.py       结构校验、溯源核对、结构化导出、跨会索引与结转(含 --selftest 35 项)
   fix_minutes_docx.py       待办表版式后处理
   rasterize_pdf.py          PDF 逐页转 PNG
   docx2pdf_wps.ps1          WPS 导出 PDF(Windows)
 tests/
-  test_all.py               全量回归 65 项
+  test_all.py               全量回归 83 项
 CHANGELOG.md                版本变更
 ```
 
@@ -228,9 +228,9 @@ python "$MNX_SCRIPTS/validate_minutes.py" --selftest
 python -I tests/test_all.py
 ```
 
-`--selftest` 24 项覆盖必需节、待办列、状态枚举、溯源、未识别章节、编码兜底、骨架导出、跨会滑期。
+`--selftest` 35 项覆盖必需节、待办列、状态枚举、溯源、未识别章节、编码兜底、骨架导出、跨会滑期、上期结转、源材料后缀分流、跨会跟踪五项缺陷修复。
 
-`tests/test_all.py` 65 项覆盖六类骨架的判定与导出、UTF-8/UTF-8-BOM/GBK/UTF-16 四种编码、五种标题编号前缀、schema 合规、既有校验项不退化、CLI 端到端。
+`tests/test_all.py` 83 项覆盖六类骨架的判定与导出、UTF-8/UTF-8-BOM/GBK/UTF-16 四种编码、五种标题编号前缀、schema 合规、转写稿形态、正文标号与表格版式、既有校验项不退化、CLI 端到端。
 
 改提炼口径后跑 `--selftest` 确认校验逻辑没退化;改骨架或章节名后跑全量回归。
 
@@ -240,10 +240,11 @@ python -I tests/test_all.py
 
 - 带 `[mm:ss] 说话人N：` 前缀的转写稿(上游管线产物)
 - 普通 md / txt / docx 记录
+- SRT / VTT 字幕、`segments` 结构的转录 JSON(`--source` 与主文件同一套后缀分流)
 - 手写笔记、聊天记录、散会整理稿
 
 缺失会议基本信息时直接省略该字段,不推测补全。材料开头截断或中途缺失时主动收缩推论强度,不把残缺片段当完整事实展开。
 
 ## 版本
 
-当前 v1.16.0。变更历史见 `CHANGELOG.md`。
+当前 v1.18.1。变更历史见 `CHANGELOG.md`。

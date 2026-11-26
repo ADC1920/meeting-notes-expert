@@ -12,6 +12,7 @@
      须在单元格段落写 w:ind firstLineChars/firstLine=0 显式覆盖，否则窄列
      （如「序号」）首行内容被挤出单元格裁切
   3. 行禁止跨页断行（cantSplit）、表头行跨页重复（tblHeader）
+  4. 表头行加浅灰底纹（v1.18.1）——七列全是字，同色时读者要数到第三行才认出表头
 """
 
 import copy
@@ -22,17 +23,20 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm
 
-# 纪要表实测列宽（cm，合计 15.92 = A4 宽 21 - 两道 2.54 边距）
+# 纪要表实测列宽（cm，合计 15.82 = A4 宽 21 - 两道 2.54 边距 - 0.1 余量）
 # 7 列 = 序号/待办事项/责任人/完成时间/优先级/状态/备注（v1.13.0 起默认，含状态列）
 # 6 列 = v1.12.0 及以前的历史件（无状态列），兼容保留
 # 8 列 = 更早的 7 列含「验收标准」再补状态，按比例兜底
+#
+# v1.18.1 按渲染实测重调：备注列最常见内容是「出处：00:35 张三；强度：确定」，
+# 原 2.77cm 下折成三到四行，整行被撑高且读不全。把余量从「待办事项」列
+# 匀一部分给备注列，同时保住窄列的硬下限——第一次改到 0.9/1.3cm 时表头
+# 「序号」「优先级」被挤成两行、「未开始」也折行（实测二次渲染），故：
+#   序号 ≥1.1cm（两个字 + 内边距）、优先级/状态 ≥1.6cm（三字或四个半角字符）
 MINUTES_COL_CM = {
-    # 责任人/优先级两列原为 1.9/1.3cm，表头「责任人/责任部门」与「优先级」被折成两行
-    # （实测渲染）。七字表头单行需 3.3cm 以上，且 _available_width_cm 少算 0.1cm 会等比
-    # 缩放到 3.28 又折回去，故合计直接取 15.82 让原值原样生效。
-    7: [1.0, 3.7, 3.4, 1.95, 1.5, 1.5, 2.77],
-    6: [1.15, 5.5, 2.1, 2.2, 1.5, 3.47],
-    8: [1.0, 4.2, 1.8, 1.9, 1.2, 1.4, 1.9, 2.5],
+    7: [1.1, 3.2, 3.0, 1.95, 1.6, 1.6, 3.35],
+    6: [1.1, 5.0, 2.1, 2.1, 1.6, 3.9],
+    8: [1.1, 3.8, 1.8, 1.9, 1.5, 1.6, 1.8, 2.5],
 }
 # 其他列数表格：内容比例分配的列宽下限
 MIN_COL_CM = 1.0
@@ -128,7 +132,35 @@ def fix_table(table, widths_cm):
     if trPr.find(qn("w:tblHeader")) is None:
         _insert_ordered(trPr, OxmlElement("w:tblHeader"),
                         ("w:jc", "w:tblCellSpacing", "w:ins", "w:del", "w:trPrChange"))
+    shade_header_row(table)
     return len(table.rows)
+
+
+def shade_header_row(table, fill="F2F2F2"):
+    """给表头行加浅灰底纹。
+
+    为什么在纪要侧补而不是改 profile：enterprise-doc 的 `table.shading` 是 false
+    （公文表格传统上不加底纹），但纪要待办表 7 列全是字，表头与正文同色时
+    读者要数到第三行才认出哪行是表头（实测渲染）。这是纪要特有的可读性需求，
+    不值得为它去动全局 profile——那会让所有企业公文表格都变底纹。
+    """
+    if not table.rows:
+        return 0
+    shaded = 0
+    for cell in table.rows[0].cells:
+        tcPr = cell._tc.get_or_add_tcPr()
+        shd = tcPr.find(qn("w:shd"))
+        if shd is not None:
+            tcPr.remove(shd)
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), fill)
+        # w:shd 在 tcPr 里的位置必须在 tcW 之后、tcMar/vAlign 之前
+        _insert_ordered(tcPr, shd, ("w:noWrap", "w:tcMar", "w:textDirection",
+                                    "w:tcFitText", "w:vAlign", "w:hideMark"))
+        shaded += 1
+    return shaded
 
 
 def parse_widths(arg):
@@ -179,7 +211,7 @@ def main(argv):
     print(f"已修复 {src} -> {dst}")
     for line in reports:
         print("  " + line)
-    print("  单元格首行缩进清零、行禁止跨页断行、表头跨页重复")
+    print("  单元格首行缩进清零、行禁止跨页断行、表头跨页重复与底纹")
     return 0
 
 
