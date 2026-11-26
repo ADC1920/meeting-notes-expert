@@ -9,7 +9,7 @@ metadata:
   language: zh-CN
   output_language: 简体中文（含全过程叙述）
   role: 内容总结专家（会议纪要）
-  version: "1.17.0"
+  version: "1.17.1"
 ---
 
 # 内容总结专家（Meeting Notes Expert）

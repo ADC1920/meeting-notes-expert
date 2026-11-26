@@ -650,6 +650,15 @@ def validate(path, source_text=None, strict=False):
     def warn(name, detail=""):
         results.append(("WARN", name, detail))
 
+    def skip(name, detail=""):
+        """校验没跑成，但不是稿子的问题（可选依赖缺失、配置文件缺失）。
+
+        为什么不复用 WARN：三态判定把 WARN 当作「稿子有非致命问题」记为 degraded。
+        依赖没装是环境问题，同一份干净稿在装了 jsonschema 的机器上是 complete、
+        没装的是 degraded，会让读者误以为稿子质量变了。SKIP 不参与三态判定。
+        """
+        results.append(("SKIP", name, detail))
+
     try:
         blocks = parse_input(path)
     except ValueError as e:
@@ -925,9 +934,9 @@ def validate(path, source_text=None, strict=False):
             jsonschema.validate(payload, schema)
             ok("结构 schema", "符合 minutes-schema.json")
         except ImportError:
-            warn("结构 schema", "jsonschema 未安装，跳过")
+            skip("结构 schema", "jsonschema 未安装，本次未做 schema 校验")
         except FileNotFoundError:
-            warn("结构 schema", "minutes-schema.json 缺失，跳过")
+            skip("结构 schema", "minutes-schema.json 缺失，本次未做 schema 校验")
         except Exception as e:
             warn("结构 schema", str(e).splitlines()[0][:120])
 

@@ -1,0 +1,100 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # 纯标准库回归：一个三方包都不装。
+  # requirements.txt 声称「脚本本身只用标准库，下列为可选增强，缺失时对应功能降级」，
+  # 本 job 就是这条契约的守门人——装了 docx/jsonschema 反而测不到降级路径。
+  # 此档断言数少于 full 档：需要 jsonschema 的 schema 深校验分支走 SKIP（属「没跑」
+  # 不属「失败」），故只要求 0 FAIL。
+  minimal:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 语法检查（脚本与测试）
+        run: python -m py_compile scripts/*.py tests/*.py
+      - name: 全量回归（六类骨架 / 编码兜底 / 编号剥离 / 导出与校验一致性 / 跨会索引）
+        run: python -I tests/test_all.py
+      - name: 校验器自测（隔离模式，验证无依赖时三态判定不被环境干扰）
+        run: python -I scripts/validate_minutes.py --selftest
+
+  # 完整依赖回归：装齐 requirements.txt，验证可选增强真的能用。
+  # 与 minimal 互补——minimal 证明「没依赖也能跑」，full 证明「有依赖时功能齐全」。
+  full:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 安装可选依赖
+        run: pip install -r requirements.txt
+      - name: 确认依赖确实装上了（防止 requirements 写错时静默降级成假绿）
+        run: |
+          python -c "import docx; print('python-docx ok')"
+          python -c "import fitz; print('PyMuPDF ok')"
+          python -c "from importlib.metadata import version; print('jsonschema', version('jsonschema'))"
+      - name: 全量回归（含 docx 解析与 schema 深校验，应 0 FAIL）
+        run: python -I tests/test_all.py
+      - name: 校验器自测
+        run: python -I scripts/validate_minutes.py --selftest
+      - name: 待办表版式脚本可导入（需 python-docx）
+        run: python -I -c "import sys; sys.path.insert(0, 'scripts'); import fix_minutes_docx; print('fix_minutes_docx 可导入')"
+
+  # 依赖缺失不得污染校验结论：同一份干净稿在两种环境下三态必须是 complete。
+  # 2026-11-26 实测过的缺陷——jsonschema 未装时 schema 校验记 WARN，
+  # 导致干净稿被判 degraded，读者会误以为稿子质量问题。
+  environment-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 无 jsonschema 时干净稿应为 complete
+        run: |
+          python -I - <<'PY'
+          import sys, tempfile, pathlib
+          sys.path.insert(0, 'scripts')
+          import validate_minutes as V
+          d = pathlib.Path(tempfile.mkdtemp())
+          p = d / 'good.md'
+          p.write_text(V.SELFTEST_OK, encoding='utf-8')
+          rc, res = V.validate(p)
+          status, _ = V.summarize(res)
+          skipped = [r for r in res if r[0] == 'SKIP']
+          print(f'status={status} rc={rc} skip={len(skipped)}')
+          assert status == 'complete', f'干净稿在缺依赖环境下被误判为 {status}'
+          assert rc == 0, f'干净稿应 exit 0，实际 {rc}'
+          PY
+      - name: 装上 jsonschema 后同一份稿仍应为 complete
+        run: |
+          pip install jsonschema
+          python -I - <<'PY'
+          import sys, tempfile, pathlib
+          sys.path.insert(0, 'scripts')
+          import validate_minutes as V
+          d = pathlib.Path(tempfile.mkdtemp())
+          p = d / 'good.md'
+          p.write_text(V.SELFTEST_OK, encoding='utf-8')
+          rc, res = V.validate(p)
+          status, _ = V.summarize(res)
+          skipped = [r for r in res if r[0] == 'SKIP']
+          print(f'status={status} rc={rc} skip={len(skipped)}')
+          assert status == 'complete', f'干净稿在有依赖环境下被误判为 {status}'
+          assert not skipped, f'装了 jsonschema 不该再有 SKIP：{skipped}'
+          PY

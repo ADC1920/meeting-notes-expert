@@ -1,5 +1,25 @@
 # meeting-notes-expert 技能变更记录
 
+## 2026-11-26 · v1.17.1
+
+**动因**：给本仓加 GitHub Actions CI 时，在隔离模式（`python -I`）下跑 `validate_minutes.py --selftest` 报 FAIL，暴露出一个既有缺陷。
+
+**缺陷**：`jsonschema` 未安装时，「结构 schema」这项校验记的是 WARN。三态判定把 WARN 当作「稿子有非致命问题」→ degraded，于是**同一份干净稿在没装 jsonschema 的机器上被判 degraded，装了的是 complete**。依赖缺失是环境问题，不该算到稿子头上。
+
+**修复**
+
+1. `validate_minutes.py` 新增 `skip()` 与 "SKIP" 级别，用于「校验没跑成但不是稿子的问题」：可选依赖缺失、`minutes-schema.json` 缺失。SKIP 不参与三态判定，也不进告警列表。
+2. 原 `except ImportError` / `FileNotFoundError` 两处由 `warn` 改为 `skip`。
+3. `tests/test_all.py` 新增 2 项断言锁住该行为：干净稿三态必须为 complete；SKIP 不得进告警列表。
+
+**新增 CI**：`.github/workflows/tests.yml`，三个 job
+
+- `minimal`（Python 3.10 / 3.12）：不装任何三方包，验证「无依赖也能跑」这条契约
+- `full`（Python 3.10 / 3.12）：装齐 requirements.txt，先断言依赖确实装上（防 requirements 写错时静默降级成假绿），再跑全量回归
+- `environment-parity`：专项锁住本缺陷——同一份干净稿在装与不装 jsonschema 两种环境下三态都必须是 complete
+
+**验证**：无依赖环境 63 PASS / 0 FAIL，完整依赖环境 67 PASS / 0 FAIL；`validate_minutes.py --selftest` 两种环境均 PASS。
+
 ## 2026-11-26 · v1.17.0
 
 **动因**：用户指出纪要版式「太固定」，要求改为由提炼者按内容与结构自选，不写死一套。原实现把 `--profile formal-doc` 写死在出稿链三处（md2docx、article_style、verify），所有纪要无论性质都是同一套版式。
