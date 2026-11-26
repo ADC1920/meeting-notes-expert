@@ -1,9 +1,29 @@
 # 排版与出稿链
 
 纪要排版完全走 `article-format` 技能，本技能不复制其字体字号取值。
-**规格唯一权威源**为该技能目录下的 `profiles/formal-doc.yaml`（v2.1 起基线 `article-format.yaml` 只供继承，不对外暴露），改规格只改该 yaml。
+**规格唯一权威源**为 article-format 技能目录下的 `profiles/<profile>.yaml`（v2.1 起基线 `article-format.yaml` 只供继承，不对外暴露），改规格只改对应 yaml。
 
-纪要用 **`--profile formal-doc`**：该 profile 是原 default 基线的正式选项，版式与 v1.x 一致。v2.1 起 article-format 不再提供隐式默认，**不带 `--profile` 一律报错退出（exit 2）**。
+**version 1.17.0 起不再固定 `formal-doc`**：profile 由提炼者在写稿前按纪要的性质与结构判一次，判定结果写进交付说明。判据见下节「profile 自选」。v2.1 起 article-format 不提供隐式默认，**不带 `--profile` 一律报错退出（exit 2）**——所以必须判，不能不判。
+
+## profile 自选（写稿前判一次）
+
+判据复用本技能已有的「会议性质」四分类：性质本身就编码了「谁来读、读完要做什么」，而这两点正是版式该跟随的东西。
+
+| 会议性质 | 读者与用途 | profile | 版式差异 |
+| --- | --- | --- | --- |
+| 决策审批 | 领导层复核拍板，需快速定位决议与责任 | `enterprise-doc` | 1.5 倍行距、中文层次序数（一、/（一）），条文感强 |
+| 工作推进 | 执行层照着干，待办表是主体 | `enterprise-doc` | 同上，表格密度更高 |
+| 汇报通报 | 单向传达，通读一遍 | `business-report` | 1.5 倍行距、数字式编号、章标题居中 |
+| 研讨交流 | 交换意见，无决议，读者回看观点 | `formal-doc` | 1.3 倍行距、数字式编号，紧凑 |
+
+**四条附加规则**（优先级高于上表）：
+
+1. **正式会议**（有表决、具法律效力）一律 `enterprise-doc`，它的层次序数最适合逐条引用动议。
+2. **复盘会与站会**用 `formal-doc`：篇幅短、无表决，公文式序数反而增重。
+3. **通用总结**（访谈、播客、讲座、单人汇报）按内容定：访谈/播客这类要引原话、读者当文章读的用 `formal-doc`；讲座/课程这类要当资料回查、术语多的用 `tech-doc`（无编号标题、左对齐，便于检索）。
+4. **同一批系列会议保持同 profile**：同一项目连续多次出纪要时沿用上一份的选择，避免读者在系列里切换版式。跨会索引里已有记录时以索引里的 profile 为准。
+
+**判不准时的处置**：默认 `formal-doc`（它在 article-format 里是「其他文体」兜底），并在交付说明里写明「按通用正式文体排版」。**不要为了显得正式就选 gov-official**——那是党政机关法定文种格式，企业纪要用它属于错配。
 
 ## 路径约定（本技能独立安装，不在任何特定仓库内）
 
@@ -31,17 +51,21 @@ Windows PowerShell 用 `$env:MNX_SCRIPTS = "$HOME\.zcode\skills\meeting-notes-ex
 
 ## 出稿链
 
+先把判定结果记进环境变量 `PROFILE`，下面三步共用同一个值——**三处必须一致**，出稿与校验用不同 profile 会误报一堆版式 FAIL。
+
 ```
-# 0) 先 cd 到纪要工作目录——md2docx.py 的输出只取文件名并强制落在当前工作目录
+# 0) 先按「profile 自选」判一次，把结果记下来（示例：工作推进型会议）
+PROFILE=enterprise-doc
+# 0b) 先 cd 到纪要工作目录——md2docx.py 的输出只取文件名并强制落在当前工作目录
 #    （上游防路径穿越设计），传绝对路径的目录部分会被静默丢弃，务必按此写法
 # 1) md → docx 骨架
-python "$AF_SCRIPTS/md2docx.py" 纪要.md 中间.docx --profile formal-doc
-python "$AF_SCRIPTS/article_style.py" 中间.docx 纪要.docx --profile formal-doc
+python "$AF_SCRIPTS/md2docx.py" 纪要.md 中间.docx --profile "$PROFILE"
+python "$AF_SCRIPTS/article_style.py" 中间.docx 纪要.docx --profile "$PROFILE"
 # 2) 待办表格版式（固定列宽、单元格缩进清零、防跨页断行、表头跨页重复）
 python "$MNX_SCRIPTS/fix_minutes_docx.py" 纪要.docx 纪要-终.docx
 ```
 
-**换文体要改源稿重跑 md2docx，不要拿成品重排**——`article_style.py` 只换样式，已固化的列表编号与表格版式不会跟着变。
+**换 profile 要改源稿重跑 md2docx，不要拿成品重排**——`article_style.py` 只换样式，已固化的列表编号与表格版式不会跟着变。`fix_minutes_docx.py` 的列宽与 profile 无关（只按表格列数分配），换 profile 不用重调。
 
 ## 交付前验证（四层）
 
@@ -51,7 +75,7 @@ python "$MNX_SCRIPTS/fix_minutes_docx.py" 纪要.docx 纪要-终.docx
 
    **需要机器可读产物时加 `--export`**：`--export 纪要.json` 按 `minutes-schema.json` 导出行动项、决策与四新节结构化数组；`--index 索引.jsonl --compare` 会与历史快照比对滑期，结果写进 `cross_meeting_report`。导出的 `document_kind` 与 `document_status` 和校验器同源，不会出现「校验 PASS、导出 failed」的互斥结论。
 
-2. **结构断言**：`python "$AF_SCRIPTS/verify_article_style.py" 纪要-终.docx --profile formal-doc`（约 105 条，随表格数浮动；含纸型 A4 / 页边距 2.54cm / 无字面 `**` 残留）。
+2. **结构断言**：`python "$AF_SCRIPTS/verify_article_style.py" 纪要-终.docx --profile "$PROFILE"`（约 101-108 条，随 profile 与表格数浮动；含纸型 A4 / 页边距 / 无字面 `**` 残留）。**必须传与出稿相同的 profile**，传错会报大量版式 FAIL。
 
 3. **XML 合法**：`officecli validate 纪要-终.docx`（要求 0 错误）。**WPS 保存过的文件会报 `uiPriority`/`themeFontLang` 元素顺序告警——这是 WPS 的写法不是文件损坏**：与编辑前备份对照，备份同报即放行；仅 document.xml 正文结构错误才算失败。
 

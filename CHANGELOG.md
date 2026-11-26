@@ -1,5 +1,19 @@
 # meeting-notes-expert 技能变更记录
 
+## 2026-11-26 · v1.17.0
+
+**动因**：用户指出纪要版式「太固定」，要求改为由提炼者按内容与结构自选，不写死一套。原实现把 `--profile formal-doc` 写死在出稿链三处（md2docx、article_style、verify），所有纪要无论性质都是同一套版式。
+
+**改动**
+
+1. `references/formatting.md` 新增「profile 自选」节：判据复用本技能已有的会议性质四分类（决策审批/工作推进/研讨交流/汇报通报），因为性质本身就编码了「谁来读、读完要做什么」。决策审批与工作推进→`enterprise-doc`（1.5 倍行距、中文层次序数），汇报通报→`business-report`（章标题居中、数字式编号），研讨交流→`formal-doc`（1.3 倍行距、紧凑）。
+2. 四条附加规则处理性质之外的变量：正式会议一律 `enterprise-doc`；复盘与站会用 `formal-doc`（篇幅短无表决，公文序数增重）；通用总结按内容定（访谈/播客 `formal-doc`，讲座/课程 `tech-doc` 便于检索）；同系列会议保持同 profile，跨会索引已有记录时以索引为准。
+3. 出稿链三处改用 `$PROFILE` 变量并注明「三处必须一致，出稿与校验用不同 profile 会误报大量版式 FAIL」。
+4. 判不准时默认 `formal-doc`（它在 article-format 里是「其他文体」兜底），并明确禁止「为了显得正式选 gov-official」——那是党政机关法定文种格式，企业纪要用属错配。
+5. `SKILL.md` 工作流程第 7 步加一步「判版式并记录依据」，交付说明须写明用了哪个 profile 与为什么。
+
+**验证**：`tests/test_all.py` 全量回归通过；article-format 侧 13 个 profile 回归全绿（formal-doc 106、enterprise-doc 104、business-report 104、tech-doc 102 项断言各 FAIL 0）；本技能校验器 `validate_minutes.py --selftest` PASS。
+
 ## 2026-11-22 · v1.16.0
 
 **动因**：用户要求从后端工程师视角评估技能并「P0～P2 全做、做完全面测试」。先做评估（只审不改），实测抓出 4 个 P0 与 3 个 P1 缺陷，全部留可复现反例，再逐条修复。评估结论：文档层（判据与流程）已成熟，问题全在数据层与工程层——它是一个「只能出 docx、不能被程序正确消费」的技能。
